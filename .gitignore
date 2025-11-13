@@ -39,3 +39,20 @@
 
 # debug information files
 *.dwo
+
+# Build artifacts
+/build/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Generated files
+compile_commands.json
+*.log
+
+# OS / editor junk
+.DS_Store
+*.swp

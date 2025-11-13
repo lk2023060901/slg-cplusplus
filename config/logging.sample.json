@@ -1,0 +1,33 @@
+{
+  "loggers": [
+    {
+      "name": "game",
+      "file": "logs/game.log",
+      "level": "info",
+      "pattern": "[%Y-%m-%d %H:%M:%S.%e] [%l] %v",
+      "rotation": {
+        "type": "daily",
+        "hour": 0,
+        "minute": 0,
+        "retain_days": 7
+      },
+      "async": {
+        "enabled": true,
+        "queue_size": 8192,
+        "thread_count": 1,
+        "overflow_policy": "block"
+      }
+    },
+    {
+      "name": "metrics",
+      "file": "logs/metrics.log",
+      "level": "debug",
+      "pattern": "[%H:%M:%S.%e][%l] %v",
+      "rotation": {
+        "type": "size",
+        "max_size_mb": 32,
+        "max_files": 5
+      }
+    }
+  ]
+}
