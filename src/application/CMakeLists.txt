@@ -31,7 +31,7 @@ function(slg_application_define_library target_name lib_type)
     )
 
     target_compile_features(${target_name} PUBLIC cxx_std_17)
-    target_link_libraries(${target_name} PUBLIC slg_tcp_static)
+    target_link_libraries(${target_name} PUBLIC slg_tcp_static slg_json_static)
 
     if(lib_type STREQUAL "SHARED")
         target_compile_definitions(${target_name}

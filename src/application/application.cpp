@@ -6,10 +6,12 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "json/json_reader.h"
 #include "network/tcp/tcp_client.h"
 #include "network/tcp/tcp_server.h"
 
 namespace tcp = slg::network::tcp;
+namespace json = slg::json;
 
 namespace slg::application {
 
@@ -84,12 +86,12 @@ void Application::AddConfigHook(ConfigHook hook) {
     config_hooks_.push_back(std::move(hook));
 }
 
-const nlohmann::json& Application::Config() const noexcept {
+const json::JsonValue& Application::Config() const noexcept {
     return config_;
 }
 
-void Application::MergeConfig(const nlohmann::json& extra) {
-    config_.merge_patch(extra);
+void Application::MergeConfig(const json::JsonValue& extra) {
+    config_.Raw().merge_patch(extra.Raw());
 }
 
 tcp::TcpIoContext& Application::TcpContext() noexcept {
@@ -149,13 +151,20 @@ void Application::ParseCommandLine(int argc, const char* argv[]) {
 }
 
 void Application::LoadConfig() {
-    config_ = nlohmann::json::object();
+    config_ = json::JsonValue::Object();
     if (!config_path_.empty() && std::filesystem::exists(config_path_)) {
-        std::ifstream input(config_path_);
-        if (!input.is_open()) {
-            throw std::runtime_error("Unable to open config file: " + config_path_);
+        json::JsonReader reader;
+        try {
+            auto parsed = reader.ParseFile(config_path_);
+            if (parsed.IsObject()) {
+                config_ = std::move(parsed);
+            } else {
+                std::cerr << "Config file " << config_path_
+                          << " does not contain a JSON object; using empty object\n";
+            }
+        } catch (const std::exception& ex) {
+            throw std::runtime_error(std::string("Failed to parse config: ") + ex.what());
         }
-        input >> config_;
     }
 
     for (auto& hook : config_hooks_) {

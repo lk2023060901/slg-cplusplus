@@ -15,17 +15,18 @@
 #include <vector>
 
 #include <boost/asio/ip/tcp.hpp>
-#include <nlohmann/json.hpp>
 
 #include <cxxopts.hpp>
 
 #include "application/application_export.h"
 #include "application/dependency_container.h"
+#include "json/json_value.h"
 #include "network/tcp/tcp_client.h"
 #include "network/tcp/tcp_io_context.h"
 #include "network/tcp/tcp_server.h"
 
 namespace tcp = slg::network::tcp;
+namespace json = slg::json;
 
 namespace slg::application {
 
@@ -43,7 +44,7 @@ public:
     using ShutdownHook = std::function<void(Application&)>;
     using SignalHandler = std::function<void(int)>;
     using CliHook = std::function<void(cxxopts::Options&)>;
-    using ConfigHook = std::function<void(nlohmann::json&)>;
+    using ConfigHook = std::function<void(json::JsonValue&)>;
 
     SLG_APPLICATION_API Application();
     SLG_APPLICATION_API explicit Application(Options options);
@@ -68,8 +69,20 @@ public:
         return dependencies_.Resolve<T>(key);
     }
 
-    SLG_APPLICATION_API const nlohmann::json& Config() const noexcept;
-    SLG_APPLICATION_API void MergeConfig(const nlohmann::json& extra);
+    SLG_APPLICATION_API const json::JsonValue& Config() const noexcept;
+
+    template <typename T>
+    std::optional<T> GetConfigSection(std::string_view key) const {
+        if (!config_.IsObject()) {
+            return std::nullopt;
+        }
+        auto section = config_.Get(key);
+        if (!section.has_value()) {
+            return std::nullopt;
+        }
+        return section->template As<T>();
+    }
+    SLG_APPLICATION_API void MergeConfig(const json::JsonValue& extra);
 
     SLG_APPLICATION_API tcp::TcpIoContext& TcpContext() noexcept;
 
@@ -101,7 +114,7 @@ private:
     std::vector<ConfigHook> config_hooks_;
     std::unordered_map<int, std::vector<SignalHandler>> signal_handlers_;
 
-    nlohmann::json config_;
+    json::JsonValue config_;
     std::string config_path_;
     bool config_loaded_{false};
 
