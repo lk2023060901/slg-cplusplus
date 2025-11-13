@@ -7,5 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_subdirectory(src/singleton)
+add_subdirectory(src/threading)
+add_subdirectory(src/network)
+add_subdirectory(src/application)
 add_subdirectory(src/json)
 add_subdirectory(src/logging)
