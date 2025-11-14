@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+import "common/error_code.proto";
+
+package login;
+
+// LoginAuthReq 登录请求，客户端向 Login 服务器发起验证的字段集合
+message LoginAuthReq {
+    // 平台账号标识
+    string account_id = 1;
+    // 平台发放且需验证的凭证
+    string access_token = 2;
+    // 渠道类型（如微信/QQ 等代理）
+    string channel = 3;
+    // 客户端语言
+    string language = 4;
+    // 客户端外网 IP，安全及路由使用
+    string client_ip = 5;
+    // 玩家选定的区服（可空为自动推荐）
+    string selected_server_id = 6;
+}
+
+// LoginAuthRes 登录响应，返回校验结果与最终分配信息
+message LoginAuthRes {
+    // 错误码
+    common.ErrorCode err_code = 1;
+    // 最终分配的区服 ID
+    string selected_server_id = 2;
+    // 账户唯一 UID
+    string uid = 3;
+}
