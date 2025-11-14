@@ -42,6 +42,7 @@ public:
 
     using InitHook = std::function<void(Application&)>;
     using ShutdownHook = std::function<void(Application&)>;
+    using StopHook = std::function<void(Application&)>;
     using SignalHandler = std::function<void(int)>;
     using CliHook = std::function<void(cxxopts::Options&)>;
     using ConfigHook = std::function<void(json::JsonValue&)>;
@@ -55,6 +56,7 @@ public:
 
     SLG_APPLICATION_API void SetInitializeHook(InitHook hook);
     SLG_APPLICATION_API void SetShutdownHook(ShutdownHook hook);
+    SLG_APPLICATION_API void SetStopHook(StopHook hook);
     SLG_APPLICATION_API void AddSignalHandler(int signal_number, SignalHandler handler);
     SLG_APPLICATION_API void AddCliHook(CliHook hook);
     SLG_APPLICATION_API void AddConfigHook(ConfigHook hook);
@@ -96,8 +98,8 @@ public:
     SLG_APPLICATION_API std::shared_ptr<tcp::TcpClient> CreateTcpClient();
 
 private:
-    void ParseCommandLine(int argc, const char* argv[]);
-    void LoadConfig();
+    bool ParseCommandLine(int argc, const char* argv[]);
+    bool LoadConfig();
     void SetupSignalHandling();
     void HandleSignal(int signal_number);
     void WaitForShutdown();
@@ -120,11 +122,14 @@ private:
 
     InitHook init_hook_;
     ShutdownHook shutdown_hook_;
+    StopHook stop_hook_;
 
     std::promise<void> shutdown_promise_;
     std::future<void> shutdown_future_;
     std::atomic<bool> stopping_{false};
     bool shutdown_signal_sent_{false};
+    bool cli_requested_exit_{false};
+    int cli_exit_code_{0};
 
     static Application* active_instance_;
 };

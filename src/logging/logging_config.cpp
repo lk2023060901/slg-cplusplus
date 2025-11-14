@@ -128,8 +128,10 @@ LoggerConfig ParseLoggerConfig(const nlohmann::json& node) {
     }
 
     config.file_path = node.value("file", std::string{});
-    if (config.file_path.empty()) {
-        throw std::runtime_error("Logger " + config.name + " requires a file path");
+    config.enable_console = node.value("console", false);
+    if (config.file_path.empty() && !config.enable_console) {
+        throw std::runtime_error("Logger " + config.name +
+                                 " must enable console output or provide a file path");
     }
 
     if (node.contains("pattern")) {
@@ -140,7 +142,7 @@ LoggerConfig ParseLoggerConfig(const nlohmann::json& node) {
         config.level = ParseLevel(node.at("level").get<std::string>());
     }
 
-    if (node.contains("rotation")) {
+    if (!config.file_path.empty() && node.contains("rotation")) {
         config.rotation = ParseRotationPolicy(node.at("rotation"));
     }
 
@@ -153,14 +155,7 @@ LoggerConfig ParseLoggerConfig(const nlohmann::json& node) {
 
 }  // namespace
 
-LoggingConfig LoadLoggingConfigFromFile(const std::string& file_path) {
-    std::ifstream input(file_path);
-    if (!input.is_open()) {
-        throw std::runtime_error("Unable to open logging config: " + file_path);
-    }
-
-    nlohmann::json json;
-    input >> json;
+LoggingConfig LoadLoggingConfigFromJson(const nlohmann::json& json) {
     if (!json.contains("loggers") || !json.at("loggers").is_array()) {
         throw std::runtime_error("Logging config must contain a 'loggers' array");
     }
@@ -175,6 +170,17 @@ LoggingConfig LoadLoggingConfigFromFile(const std::string& file_path) {
     }
 
     return config;
+}
+
+LoggingConfig LoadLoggingConfigFromFile(const std::string& file_path) {
+    std::ifstream input(file_path);
+    if (!input.is_open()) {
+        throw std::runtime_error("Unable to open logging config: " + file_path);
+    }
+
+    nlohmann::json json;
+    input >> json;
+    return LoadLoggingConfigFromJson(json);
 }
 
 }  // namespace slg::logging

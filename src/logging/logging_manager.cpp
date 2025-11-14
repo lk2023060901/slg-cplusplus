@@ -12,6 +12,7 @@
 #include <spdlog/sinks/daily_file_sink.h>
 #include <spdlog/sinks/hourly_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 namespace slg::logging {
 namespace {
@@ -48,6 +49,12 @@ std::size_t EffectiveTimeRetention(const RotationPolicy& policy) {
 
 LoggingManager::LoggingManager() = default;
 LoggingManager::~LoggingManager() { Shutdown(); }
+
+void LoggingManager::LoadConfig(const LoggingConfig& config) {
+    has_config_path_ = false;
+    config_path_.clear();
+    ApplyConfig(config);
+}
 
 void LoggingManager::LoadConfigFromFile(const std::string& file_path) {
     auto config = LoadLoggingConfigFromFile(file_path);
@@ -130,40 +137,49 @@ std::shared_ptr<spdlog::logger> LoggingManager::CreateLogger(const LoggerConfig&
 }
 
 std::vector<spdlog::sink_ptr> LoggingManager::BuildSinks(const LoggerConfig& config) {
-    EnsureParentDirectory(config.file_path);
-
     std::vector<spdlog::sink_ptr> sinks;
-    const auto& rotation = config.rotation;
+    if (config.enable_console) {
+        sinks.emplace_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+    }
 
-    switch (rotation.type) {
-        case RotationType::kDaily: {
-            const auto retention = EffectiveTimeRetention(rotation);
-            sinks.emplace_back(std::make_shared<spdlog::sinks::daily_file_sink_mt>(
-                config.file_path, rotation.hour, rotation.minute, rotation.truncate,
-                ToUint16(retention)));
-            break;
-        }
-        case RotationType::kHourly: {
-            const auto retention = EffectiveTimeRetention(rotation);
-            sinks.emplace_back(std::make_shared<spdlog::sinks::hourly_file_sink_mt>(
-                config.file_path, rotation.truncate, ToUint16(retention)));
-            break;
-        }
-        case RotationType::kSize: {
-            const auto max_files = rotation.max_files > 0 ? rotation.max_files : 1;
-            if (rotation.max_size_bytes == 0) {
-                throw std::runtime_error(
-                    "Size-based rotation requires a non-zero max_size or max_size_mb");
+    if (!config.file_path.empty()) {
+        EnsureParentDirectory(config.file_path);
+        const auto& rotation = config.rotation;
+
+        switch (rotation.type) {
+            case RotationType::kDaily: {
+                const auto retention = EffectiveTimeRetention(rotation);
+                sinks.emplace_back(std::make_shared<spdlog::sinks::daily_file_sink_mt>(
+                    config.file_path, rotation.hour, rotation.minute, rotation.truncate,
+                    ToUint16(retention)));
+                break;
             }
-            sinks.emplace_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                config.file_path, rotation.max_size_bytes, max_files, rotation.truncate));
-            break;
+            case RotationType::kHourly: {
+                const auto retention = EffectiveTimeRetention(rotation);
+                sinks.emplace_back(std::make_shared<spdlog::sinks::hourly_file_sink_mt>(
+                    config.file_path, rotation.truncate, ToUint16(retention)));
+                break;
+            }
+            case RotationType::kSize: {
+                const auto max_files = rotation.max_files > 0 ? rotation.max_files : 1;
+                if (rotation.max_size_bytes == 0) {
+                    throw std::runtime_error(
+                        "Size-based rotation requires a non-zero max_size or max_size_mb");
+                }
+                sinks.emplace_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                    config.file_path, rotation.max_size_bytes, max_files, rotation.truncate));
+                break;
+            }
+            case RotationType::kNone:
+            default:
+                sinks.emplace_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+                    config.file_path, rotation.truncate));
+                break;
         }
-        case RotationType::kNone:
-        default:
-            sinks.emplace_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-                config.file_path, rotation.truncate));
-            break;
+    }
+
+    if (sinks.empty()) {
+        throw std::runtime_error("Logger " + config.name + " has no sinks configured");
     }
 
     return sinks;

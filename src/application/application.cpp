@@ -29,8 +29,12 @@ Application::~Application() {
 }
 
 int Application::Run(int argc, const char* argv[]) {
-    ParseCommandLine(argc, argv);
-    LoadConfig();
+    if (!ParseCommandLine(argc, argv)) {
+        return cli_exit_code_;
+    }
+    if (!LoadConfig()) {
+        return 1;
+    }
 
     tcp_context_->Start();
     active_instance_ = this;
@@ -58,6 +62,10 @@ void Application::Stop() {
         return;
     }
 
+    if (stop_hook_) {
+        stop_hook_(*this);
+    }
+
     tcp_context_->Stop();
 
     if (!shutdown_signal_sent_) {
@@ -72,6 +80,10 @@ void Application::SetInitializeHook(InitHook hook) {
 
 void Application::SetShutdownHook(ShutdownHook hook) {
     shutdown_hook_ = std::move(hook);
+}
+
+void Application::SetStopHook(StopHook hook) {
+    stop_hook_ = std::move(hook);
 }
 
 void Application::AddSignalHandler(int signal_number, SignalHandler handler) {
@@ -117,7 +129,7 @@ std::shared_ptr<tcp::TcpClient> Application::CreateTcpClient() {
     return client;
 }
 
-void Application::ParseCommandLine(int argc, const char* argv[]) {
+bool Application::ParseCommandLine(int argc, const char* argv[]) {
     cxxopts::Options cli(options_.name, options_.description);
     cli.add_options()
         ("c,config", "Path to configuration file",
@@ -136,11 +148,15 @@ void Application::ParseCommandLine(int argc, const char* argv[]) {
     } catch (const cxxopts::exceptions::exception& ex) {
         std::cerr << ex.what() << std::endl;
         std::cout << cli.help() << std::endl;
-        std::exit(1);
+        cli_requested_exit_ = true;
+        cli_exit_code_ = 1;
+        return false;
     }
     if (result.count("help") && result["help"].as<bool>()) {
         std::cout << cli.help() << std::endl;
-        std::exit(0);
+        cli_requested_exit_ = true;
+        cli_exit_code_ = 0;
+        return false;
     }
 
     config_path_ = result["config"].as<std::string>();
@@ -148,22 +164,23 @@ void Application::ParseCommandLine(int argc, const char* argv[]) {
     if (options_.io_threads != tcp_context_->ThreadCount()) {
         tcp_context_ = std::make_unique<tcp::TcpIoContext>(options_.io_threads);
     }
+    return true;
 }
 
-void Application::LoadConfig() {
+bool Application::LoadConfig() {
     config_ = json::JsonValue::Object();
     if (!config_path_.empty() && std::filesystem::exists(config_path_)) {
         json::JsonReader reader;
-        try {
-            auto parsed = reader.ParseFile(config_path_);
-            if (parsed.IsObject()) {
-                config_ = std::move(parsed);
-            } else {
-                std::cerr << "Config file " << config_path_
-                          << " does not contain a JSON object; using empty object\n";
-            }
-        } catch (const std::exception& ex) {
-            throw std::runtime_error(std::string("Failed to parse config: ") + ex.what());
+        auto parsed = reader.ParseFile(config_path_);
+        if (!parsed.has_value()) {
+            std::cerr << "Failed to parse config file: " << config_path_ << std::endl;
+            return false;
+        }
+        if (parsed->IsObject()) {
+            config_ = std::move(*parsed);
+        } else {
+            std::cerr << "Config file " << config_path_
+                      << " does not contain a JSON object; using empty object\n";
         }
     }
 
@@ -172,6 +189,7 @@ void Application::LoadConfig() {
     }
 
     config_loaded_ = true;
+    return true;
 }
 
 void Application::SetupSignalHandling() {

@@ -48,7 +48,8 @@
         "variant": "cpp",
         "vector": "cpp",
         "memory": "cpp",
-        "algorithm": "cpp"
+        "algorithm": "cpp",
+        "iostream": "cpp"
     },
     "git.ignoreLimitWarning": true,
     "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"

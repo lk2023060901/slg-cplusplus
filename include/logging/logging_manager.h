@@ -25,6 +25,7 @@ public:
     SLG_LOGGING_API LoggingManager();
     SLG_LOGGING_API ~LoggingManager();
 
+    SLG_LOGGING_API void LoadConfig(const LoggingConfig& config);
     SLG_LOGGING_API void LoadConfigFromFile(const std::string& file_path);
     SLG_LOGGING_API void Reload();
     SLG_LOGGING_API void ReloadFromFile(const std::string& file_path);

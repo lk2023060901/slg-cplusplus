@@ -7,6 +7,7 @@
 
 #include <spdlog/async.h>
 #include <spdlog/spdlog.h>
+#include <nlohmann/json_fwd.hpp>
 
 #include "logging/logging_export.h"
 
@@ -43,6 +44,7 @@ struct LoggerConfig {
     spdlog::level::level_enum level{spdlog::level::info};
     RotationPolicy rotation;
     AsyncPolicy async;
+    bool enable_console{false};
 };
 
 struct LoggingConfig {
@@ -50,5 +52,6 @@ struct LoggingConfig {
 };
 
 SLG_LOGGING_API LoggingConfig LoadLoggingConfigFromFile(const std::string& file_path);
+SLG_LOGGING_API LoggingConfig LoadLoggingConfigFromJson(const nlohmann::json& node);
 
 }  // namespace slg::logging

@@ -1,0 +1,9 @@
+#pragma once
+
+#include <string_view>
+
+namespace login::build_info {
+inline constexpr std::string_view kVersion = "@LOGIN_BUILD_VERSION@";
+inline constexpr std::string_view kTimestamp = "@LOGIN_BUILD_TIMESTAMP@";
+inline constexpr std::string_view kGitHash = "@LOGIN_BUILD_GIT_HASH@";
+}  // namespace login::build_info

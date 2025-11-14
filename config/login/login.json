@@ -1,0 +1,48 @@
+{
+  "login": {
+    "host": "0.0.0.0",
+    "port": 57001,
+    "max_connections": 8192,
+    "io_threads": 2,
+    "description": "Example configuration for the C++ login service"
+  },
+  "service": {
+    "name": "login-service",
+    "shard_id": 1
+  },
+  "logging": {
+    "loggers": [
+      {
+        "name": "login",
+        "file": "logs/login.log",
+        "level": "info",
+        "pattern": "[%Y-%m-%d %H:%M:%S.%e] [%l] %v",
+        "console": true,
+        "rotation": {
+          "type": "daily",
+          "hour": 0,
+          "minute": 0,
+          "retain_days": 7
+        },
+        "async": {
+          "enabled": true,
+          "queue_size": 8192,
+          "thread_count": 1,
+          "overflow_policy": "block"
+        }
+      },
+      {
+        "name": "metrics",
+        "file": "logs/metrics.log",
+        "level": "debug",
+        "pattern": "[%H:%M:%S.%e][%l] %v",
+        "console": false,
+        "rotation": {
+          "type": "size",
+          "max_size_mb": 32,
+          "max_files": 5
+        }
+      }
+    ]
+  }
+}
