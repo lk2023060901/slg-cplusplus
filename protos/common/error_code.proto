@@ -7,10 +7,6 @@ enum ErrorCode {
     ERROR_SUCCESS = 0;          // 成功
 
     // 0-199 保留占位，方便未来扩展
-    ERROR_RESERVED_1 = 1;
-    ERROR_RESERVED_2 = 2;
-    ERROR_RESERVED_3 = 3;
-    // ... 可在此继续保留或分配
 
     // 200-399 登录认证相关错误
     ERROR_LOGIN_INVALID_TOKEN = 200;   // access_token 无效
