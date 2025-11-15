@@ -2,6 +2,7 @@
 
 #include <boost/circular_buffer.hpp>
 
+#include <array>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -30,9 +31,6 @@ public:
                 CopyOut(0, header_bytes.data(), header_bytes.size());
                 buffer_.erase_begin(PacketHeader::kSize);
                 auto header = DeserializeHeader(header_bytes.data());
-                if (!header.ValidateChecksum()) {
-                    continue;
-                }
                 pending_header_ = header;
             }
             if (buffer_.size() < pending_header_->length) {

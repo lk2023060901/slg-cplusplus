@@ -16,6 +16,10 @@
     "datacenter_id": 1,
     "worker_id": 42
   },
+  "compression": {
+    "handler": "lz4",
+    "min_bytes": 512
+  },
   "listeners": [
     {
       "name": "player-listener",

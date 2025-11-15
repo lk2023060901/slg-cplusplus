@@ -26,6 +26,9 @@
 #include "network/tcp/tcp_client.h"
 #include "network/tcp/tcp_io_context.h"
 #include "network/tcp/tcp_server.h"
+#include "compressor/compression_processor.h"
+#include "crypto/crypto_processor.h"
+#include "application/protocol/security_context.h"
 
 namespace tcp = slg::network::tcp;
 namespace json = slg::json;
@@ -115,6 +118,11 @@ public:
         std::size_t read_buffer_size{tcp::TcpServer::kDefaultReadBufferSize};
         std::string type{"tcp"};
         std::string handler;
+        std::string crypto_handler;
+        std::string crypto_key;
+        std::string crypto_iv;
+        std::string compression_handler;
+        std::size_t compression_min_bytes{0};
     };
 
     struct ConnectorConfig {
@@ -130,7 +138,17 @@ public:
         std::string type{"tcp"};
         std::string handler;
         ReconnectPolicy reconnect;
+        std::string crypto_handler;
+        std::string crypto_key;
+        std::string crypto_iv;
+        std::string compression_handler;
+        std::size_t compression_min_bytes{0};
     };
+
+    using CryptoFactory = std::function<std::shared_ptr<protocol::CryptoProcessor>(
+        const std::string& key,
+        const std::string& iv)>;
+    using CompressionFactory = std::function<std::shared_ptr<protocol::CompressionProcessor>()>;
 
     using ListenerStartCallback = std::function<void(const ListenerConfig&)>;
     using ListenerFailureCallback = std::function<void(const ListenerConfig&, const std::string&)>;
@@ -152,6 +170,15 @@ public:
         tcp::TcpConnection::ErrorHandler on_error,
         ConnectorStartCallback on_started = {},
         ConnectorFailureCallback on_failed = {});
+
+    SLG_APPLICATION_API void RegisterCryptoFactory(std::string name, CryptoFactory factory);
+    SLG_APPLICATION_API void RegisterCompressionFactory(std::string name,
+                                                        CompressionFactory factory);
+
+    SLG_APPLICATION_API std::shared_ptr<protocol::SecurityContext> CreateListenerSecurityContext(
+        std::string_view handler_name) const;
+    SLG_APPLICATION_API std::shared_ptr<protocol::SecurityContext> CreateConnectorSecurityContext(
+        std::string_view handler_name) const;
 
     SLG_APPLICATION_API bool StartListeners();
     SLG_APPLICATION_API bool StartConnectors();
@@ -210,6 +237,17 @@ private:
     void NotifyConnectorFailed(const ConnectorConfig& config,
                                const std::string& reason,
                                const ConnectorHandler* handler);
+    std::shared_ptr<protocol::SecurityContext> CreateSecurityContext(const std::string& crypto,
+                                                                     const std::string& crypto_key,
+                                                                     const std::string& crypto_iv,
+                                                                     const std::string& compression,
+                                                                     std::size_t compression_min_bytes) const;
+    std::shared_ptr<protocol::CryptoProcessor> CreateCryptoProcessor(
+        const std::string& handler,
+        const std::string& key,
+        const std::string& iv) const;
+    std::shared_ptr<protocol::CompressionProcessor> CreateCompressionProcessor(
+        const std::string& handler) const;
 
     Options options_;
     DependencyContainer dependencies_;
@@ -239,6 +277,14 @@ private:
     bool shutdown_signal_sent_{false};
     bool cli_requested_exit_{false};
     int cli_exit_code_{0};
+
+    std::string global_crypto_handler_{"none"};
+    std::string global_crypto_key_{};
+    std::string global_crypto_iv_{};
+    std::string global_compression_handler_{"none"};
+    std::size_t global_compression_min_bytes_{0};
+    std::unordered_map<std::string, CryptoFactory> crypto_factories_;
+    std::unordered_map<std::string, CompressionFactory> compression_factories_;
 
     static Application* active_instance_;
 };

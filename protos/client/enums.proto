@@ -7,9 +7,11 @@ package client;
 enum Command {
     CMD_UNSPECIFIED = 0; // 未定义的占位命令
 
-    // Login 模块（100001-100300）：处理登录与心跳
+    // 公共心跳（0-9999）：适用于所有模块
+    CMD_HEARTBEAT_REQ = 100;  // 心跳请求
+    CMD_HEARTBEAT_RES = 101;  // 心跳响应
+
+    // Login 模块（100001-100300）：处理登录
     CMD_LOGIN_AUTH_REQ = 100001; // 登录请求-客户端发往服务器
     CMD_LOGIN_AUTH_RES = 100002; // 登录响应-服务器返回给客户端
-    CMD_HEARTBEAT_REQ = 100003;  // 心跳请求
-    CMD_HEARTBEAT_RES = 100004;  // 心跳响应
 }

@@ -7,8 +7,9 @@
 
 namespace slg::application::protocol {
 
-TcpProtocolRouter::TcpProtocolRouter(std::shared_ptr<ProtocolRegistry> registry)
-    : registry_(std::move(registry)) {}
+TcpProtocolRouter::TcpProtocolRouter(std::shared_ptr<ProtocolRegistry> registry,
+                                     std::shared_ptr<SecurityContext> security_context)
+    : registry_(std::move(registry)), security_context_(std::move(security_context)) {}
 
 void TcpProtocolRouter::OnAccept(const slg::network::tcp::TcpConnectionPtr&) {}
 
@@ -18,9 +19,9 @@ void TcpProtocolRouter::OnReceive(const slg::network::tcp::TcpConnectionPtr& con
     auto& reader = GetReader(connection.get());
     reader.Feed(data, size, [this, connection](const PacketHeader& header,
                                                std::vector<std::uint8_t> payload) {
-        if (!header.ValidateChecksum()) {
-            std::cerr << "[protocol] invalid checksum from " << connection->RemoteAddress()
-                      << std::endl;
+        if (!security_context_->Decode(header, payload)) {
+            std::cerr << "[protocol] failed to decode payload from "
+                      << connection->RemoteAddress() << std::endl;
             return;
         }
         if (!registry_->Dispatch(header, connection, payload.data(), payload.size())) {

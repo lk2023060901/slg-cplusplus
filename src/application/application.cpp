@@ -13,6 +13,10 @@
 #include "json/json_reader.h"
 #include "network/tcp/tcp_client.h"
 #include "network/tcp/tcp_server.h"
+#include "compressor/compression_processor.h"
+#include "crypto/aes_crypto_processor.h"
+#include "crypto/crypto_processor.h"
+#include "application/protocol/security_context.h"
 
 namespace tcp = slg::network::tcp;
 namespace json = slg::json;
@@ -26,6 +30,21 @@ Application::Application() : Application(Options{}) {}
 Application::Application(Options options) : options_(std::move(options)) {
     tcp_context_ = std::make_unique<tcp::TcpIoContext>(options_.io_threads);
     shutdown_future_ = shutdown_promise_.get_future();
+    RegisterCryptoFactory("none", [](const std::string&, const std::string&) {
+        return std::make_shared<protocol::NullCryptoProcessor>();
+    });
+    RegisterCryptoFactory("aes128", [](const std::string& key, const std::string& iv) {
+        return std::make_shared<protocol::Aes128CtrCryptoProcessor>(key, iv);
+    });
+    RegisterCompressionFactory("none", []() {
+        return std::make_shared<protocol::NullCompressionProcessor>();
+    });
+    RegisterCompressionFactory("lz4", []() {
+        return std::make_shared<protocol::Lz4CompressionProcessor>();
+    });
+    RegisterCompressionFactory("zstd", []() {
+        return std::make_shared<protocol::ZstdCompressionProcessor>();
+    });
 }
 
 Application::~Application() {
@@ -257,6 +276,34 @@ std::vector<Application::ListenerConfig> Application::ParseListenerConfigs() con
                                   .value_or(tcp::TcpServer::kDefaultReadBufferSize);
         cfg.type = entry->GetAs<std::string>("type").value_or("tcp");
         cfg.handler = entry->GetAs<std::string>("handler").value_or("");
+        cfg.crypto_handler = global_crypto_handler_;
+        cfg.crypto_key = global_crypto_key_;
+        cfg.crypto_iv = global_crypto_iv_;
+        cfg.compression_handler = global_compression_handler_;
+        cfg.compression_min_bytes = global_compression_min_bytes_;
+        if (auto crypto = entry->Get("crypto")) {
+            if (crypto->IsObject()) {
+                if (auto handler = crypto->GetAs<std::string>("handler")) {
+                    cfg.crypto_handler = *handler;
+                }
+                if (auto key = crypto->GetAs<std::string>("key")) {
+                    cfg.crypto_key = *key;
+                }
+                if (auto iv = crypto->GetAs<std::string>("iv")) {
+                    cfg.crypto_iv = *iv;
+                }
+            }
+        }
+        if (auto compression = entry->Get("compression")) {
+            if (compression->IsObject()) {
+                if (auto handler = compression->GetAs<std::string>("handler")) {
+                    cfg.compression_handler = *handler;
+                }
+                if (auto min_bytes = compression->GetAs<std::size_t>("min_bytes")) {
+                    cfg.compression_min_bytes = *min_bytes;
+                }
+            }
+        }
         if (cfg.port == 0 || cfg.handler.empty()) {
             continue;
         }
@@ -403,6 +450,34 @@ std::vector<Application::ConnectorConfig> Application::ParseConnectorConfigs() c
         cfg.port = entry->GetAs<std::uint16_t>("port").value_or(0);
         cfg.type = entry->GetAs<std::string>("type").value_or("tcp");
         cfg.handler = entry->GetAs<std::string>("handler").value_or("");
+        cfg.crypto_handler = global_crypto_handler_;
+        cfg.crypto_key = global_crypto_key_;
+        cfg.crypto_iv = global_crypto_iv_;
+        cfg.compression_handler = global_compression_handler_;
+        cfg.compression_min_bytes = global_compression_min_bytes_;
+        if (auto crypto = entry->Get("crypto")) {
+            if (crypto->IsObject()) {
+                if (auto handler = crypto->GetAs<std::string>("handler")) {
+                    cfg.crypto_handler = *handler;
+                }
+                if (auto key = crypto->GetAs<std::string>("key")) {
+                    cfg.crypto_key = *key;
+                }
+                if (auto iv = crypto->GetAs<std::string>("iv")) {
+                    cfg.crypto_iv = *iv;
+                }
+            }
+        }
+        if (auto compression = entry->Get("compression")) {
+            if (compression->IsObject()) {
+                if (auto handler = compression->GetAs<std::string>("handler")) {
+                    cfg.compression_handler = *handler;
+                }
+                if (auto min_bytes = compression->GetAs<std::size_t>("min_bytes")) {
+                    cfg.compression_min_bytes = *min_bytes;
+                }
+            }
+        }
         if (auto reconnect_section = entry->Get("reconnect")) {
             cfg.reconnect.interval_ms = reconnect_section->GetAs<std::uint32_t>("interval_ms").value_or(1000);
             cfg.reconnect.max_interval_ms =
@@ -480,6 +555,47 @@ void Application::NotifyConnectorFailed(const ConnectorConfig& config,
               << std::endl;
 }
 
+std::shared_ptr<protocol::SecurityContext> Application::CreateSecurityContext(
+    const std::string& crypto,
+    const std::string& crypto_key,
+    const std::string& crypto_iv,
+    const std::string& compression,
+    std::size_t compression_min_bytes) const {
+    auto crypto_processor = CreateCryptoProcessor(crypto, crypto_key, crypto_iv);
+    auto compression_processor = CreateCompressionProcessor(compression);
+    return std::make_shared<protocol::SecurityContext>(std::move(crypto_processor),
+                                                       std::move(compression_processor),
+                                                       compression_min_bytes);
+}
+
+std::shared_ptr<protocol::CryptoProcessor> Application::CreateCryptoProcessor(
+    const std::string& handler,
+    const std::string& key,
+    const std::string& iv) const {
+    auto iter = crypto_factories_.find(handler);
+    if (iter == crypto_factories_.end()) {
+        auto fallback = crypto_factories_.find("none");
+        if (fallback == crypto_factories_.end()) {
+            return std::make_shared<protocol::NullCryptoProcessor>();
+        }
+        return fallback->second("", "");
+    }
+    return iter->second(key, iv);
+}
+
+std::shared_ptr<protocol::CompressionProcessor> Application::CreateCompressionProcessor(
+    const std::string& handler) const {
+    auto iter = compression_factories_.find(handler);
+    if (iter == compression_factories_.end()) {
+        auto fallback = compression_factories_.find("none");
+        if (fallback == compression_factories_.end()) {
+            return std::make_shared<protocol::NullCompressionProcessor>();
+        }
+        return fallback->second();
+    }
+    return iter->second();
+}
+
 bool Application::ParseCommandLine(int argc, const char* argv[]) {
     cxxopts::Options cli(options_.name, options_.description);
     cli.add_options()
@@ -539,6 +655,30 @@ bool Application::LoadConfig() {
         hook(config_);
     }
 
+    if (auto crypto = config_.Get("crypto")) {
+        if (crypto->IsObject()) {
+            if (auto handler = crypto->GetAs<std::string>("handler")) {
+                global_crypto_handler_ = *handler;
+            }
+            if (auto key = crypto->GetAs<std::string>("key")) {
+                global_crypto_key_ = *key;
+            }
+            if (auto iv = crypto->GetAs<std::string>("iv")) {
+                global_crypto_iv_ = *iv;
+            }
+        }
+    }
+    if (auto compression = config_.Get("compression")) {
+        if (compression->IsObject()) {
+            if (auto handler = compression->GetAs<std::string>("handler")) {
+                global_compression_handler_ = *handler;
+            }
+            if (auto min_bytes = compression->GetAs<std::size_t>("min_bytes")) {
+                global_compression_min_bytes_ = *min_bytes;
+            }
+        }
+    }
+
     config_loaded_ = true;
     return true;
 }
@@ -561,6 +701,72 @@ void Application::HandleSignal(int signal_number) {
 
 void Application::WaitForShutdown() {
     shutdown_future_.wait();
+}
+
+void Application::RegisterCryptoFactory(std::string name, CryptoFactory factory) {
+    crypto_factories_[std::move(name)] = std::move(factory);
+}
+
+void Application::RegisterCompressionFactory(std::string name, CompressionFactory factory) {
+    compression_factories_[std::move(name)] = std::move(factory);
+}
+
+std::shared_ptr<protocol::SecurityContext> Application::CreateListenerSecurityContext(
+    std::string_view handler_name) const {
+    auto configs = ParseListenerConfigs();
+    std::string crypto = global_crypto_handler_;
+    std::string crypto_key = global_crypto_key_;
+    std::string crypto_iv = global_crypto_iv_;
+    std::string compression = global_compression_handler_;
+    std::size_t compression_min_bytes = global_compression_min_bytes_;
+    for (const auto& cfg : configs) {
+        if (cfg.handler == handler_name) {
+            if (!cfg.crypto_handler.empty()) {
+                crypto = cfg.crypto_handler;
+            }
+            if (!cfg.crypto_key.empty()) {
+                crypto_key = cfg.crypto_key;
+            }
+            if (!cfg.crypto_iv.empty()) {
+                crypto_iv = cfg.crypto_iv;
+            }
+            if (!cfg.compression_handler.empty()) {
+                compression = cfg.compression_handler;
+            }
+            compression_min_bytes = cfg.compression_min_bytes;
+            break;
+        }
+    }
+    return CreateSecurityContext(crypto, crypto_key, crypto_iv, compression, compression_min_bytes);
+}
+
+std::shared_ptr<protocol::SecurityContext> Application::CreateConnectorSecurityContext(
+    std::string_view handler_name) const {
+    auto configs = ParseConnectorConfigs();
+    std::string crypto = global_crypto_handler_;
+    std::string crypto_key = global_crypto_key_;
+    std::string crypto_iv = global_crypto_iv_;
+    std::string compression = global_compression_handler_;
+    std::size_t compression_min_bytes = global_compression_min_bytes_;
+    for (const auto& cfg : configs) {
+        if (cfg.handler == handler_name) {
+            if (!cfg.crypto_handler.empty()) {
+                crypto = cfg.crypto_handler;
+            }
+            if (!cfg.crypto_key.empty()) {
+                crypto_key = cfg.crypto_key;
+            }
+            if (!cfg.crypto_iv.empty()) {
+                crypto_iv = cfg.crypto_iv;
+            }
+            if (!cfg.compression_handler.empty()) {
+                compression = cfg.compression_handler;
+            }
+            compression_min_bytes = cfg.compression_min_bytes;
+            break;
+        }
+    }
+    return CreateSecurityContext(crypto, crypto_key, crypto_iv, compression, compression_min_bytes);
 }
 
 void Application::SignalHandlerThunk(int signal_number) {
