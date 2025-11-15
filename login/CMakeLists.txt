@@ -1,12 +1,16 @@
 set(LOGIN_SOURCES
     src/main.cpp
     src/login_service.cpp
+    src/player_login_handler.cpp
+    src/internal_service_handler.cpp
     ${PROJECT_SOURCE_DIR}/src/algorithms/snowflake/snowflake_id.cpp
 )
 
 set(LOGIN_PROTO_FILES
-    ${PROJECT_SOURCE_DIR}/protos/login/login.proto
+    ${PROJECT_SOURCE_DIR}/protos/client/login/login.proto
+    ${PROJECT_SOURCE_DIR}/protos/client/enums.proto
     ${PROJECT_SOURCE_DIR}/protos/common/error_code.proto
+    ${PROJECT_SOURCE_DIR}/protos/common/common.proto
 )
 
 set(LOGIN_PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)

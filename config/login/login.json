@@ -18,14 +18,24 @@
   },
   "listeners": [
     {
-      "name": "login-tcp",
+      "name": "player-listener",
       "host": "0.0.0.0",
       "port": 58000,
       "max_connections": 8192,
       "io_threads": 2,
       "type": "tcp",
-      "handler": "login_tcp_handler",
+      "handler": "player_handler",
       "read_buffer_size": 4096
+    },
+    {
+      "name": "internal-listener",
+      "host": "127.0.0.1",
+      "port": 58010,
+      "max_connections": 1024,
+      "io_threads": 1,
+      "type": "tcp",
+      "handler": "internal_handler",
+      "read_buffer_size": 2048
     }
   ],
   "connectors": [

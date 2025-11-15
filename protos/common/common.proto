@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package common;
+
+message HeartbeatReq {
+    uint64 server_timestamp = 1;
+    uint64 client_timestamp = 2;
+}
+
+message HeartbeatRes {
+    uint64 server_timestamp = 1;
+    uint64 client_timestamp = 2;
+}
+

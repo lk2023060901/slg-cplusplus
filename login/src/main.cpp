@@ -1,21 +1,29 @@
 #include <atomic>
-#include <cstdint>
+#include <chrono>
 #include <csignal>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include "application/application.h"
 #include "json/json_value.h"
 #include "logging/logging_config.h"
 #include "logging/logging_manager.h"
-#include "login/logging_macros.h"
-#include "login/login_service.h"
+#include "application/protocol/message_codec.h"
+#include "application/protocol/protocol_registry.h"
+#include "application/protocol/tcp_protocol_router.h"
+#include "internal_service_handler.h"
+#include "logging_macros.h"
+#include "login/login.pb.h"
 #include "login_build_info.h"
+#include "login_service.h"
+#include "network/tcp/tcp_connection.h"
+#include "player_login_handler.h"
+#include "common/common.pb.h"
+#include "client/enums.pb.h"
 
 namespace app = slg::application;
 namespace json = slg::json;
@@ -24,14 +32,7 @@ namespace logging = slg::logging;
 namespace {
 
 std::atomic<int> g_received_signal{0};
-std::unique_ptr<login::LoginService> g_login_service;
-
-struct LoginConfig {
-    std::string host{"0.0.0.0"};
-    std::uint16_t port{57001};
-    std::size_t max_connections{8192};
-    std::size_t io_threads{0};
-};
+std::shared_ptr<login::LoginService> g_login_service;
 
 struct ServiceConfig {
     std::string name{"login-service"};
@@ -115,29 +116,6 @@ login::LoginService::Options LoadLoginServiceOptions(const json::JsonValue& root
     return options;
 }
 
-LoginConfig LoadLoginConfig(const json::JsonValue& root) {
-    auto login_section = root.Get("login");
-    if (!login_section.has_value() || !login_section->IsObject()) {
-        throw std::runtime_error("Missing 'login' configuration section");
-    }
-
-    LoginConfig cfg;
-    if (auto host = login_section->GetAs<std::string>("host")) {
-        cfg.host = *host;
-    }
-    if (auto port = login_section->GetAs<std::uint16_t>("port")) {
-        cfg.port = *port;
-    }
-    if (auto max_conn = login_section->GetAs<std::size_t>("max_connections")) {
-        cfg.max_connections = *max_conn;
-    }
-    if (auto io_threads = login_section->GetAs<std::size_t>("io_threads")) {
-        cfg.io_threads = *io_threads;
-    }
-
-    return cfg;
-}
-
 ServiceConfig LoadServiceConfig(const json::JsonValue& root) {
     ServiceConfig cfg;
     auto service_section = root.Get("service");
@@ -171,12 +149,114 @@ void InitializeLogging(const json::JsonValue& root) {
     }
 }
 
-void LogStartupInfo(const LoginConfig& config, const ServiceConfig& service) {
-    LOGIN_LOG_INFO("login configuration host={} port={} max_connections={} io_threads={}",
-                   config.host, config.port, config.max_connections, config.io_threads);
+void LogStartupInfo(const ServiceConfig& service) {
     LOGIN_LOG_INFO("service context name={} shard_id={}", service.name, service.shard_id);
     LOGIN_LOG_INFO("build version={} timestamp={} git_hash={}", login::build_info::kVersion,
                    login::build_info::kTimestamp, login::build_info::kGitHash);
+}
+
+std::uint64_t CurrentTimestampMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+void RegisterTcpHandlers(app::Application& app_instance,
+                         const std::shared_ptr<login::LoginService>& service) {
+    namespace protocol = slg::application::protocol;
+
+    auto player_handler = std::make_shared<login::PlayerLoginHandler>(
+        login::PlayerLoginHandler::Dependencies{service->HttpClient(), service->Snowflake(),
+                                                service->GetOptions(), service->ServerLookup()});
+    auto internal_handler = std::make_shared<login::InternalServiceHandler>();
+
+    auto player_registry = std::make_shared<protocol::ProtocolRegistry>();
+    player_registry->Register(
+        static_cast<std::uint32_t>(client::CMD_LOGIN_AUTH_REQ),
+        [player_handler](const slg::application::protocol::PacketHeader& header,
+                         const slg::network::tcp::TcpConnectionPtr& conn,
+                         const std::uint8_t* data,
+                         std::size_t size) {
+            login::LoginAuthReq request;
+            if (!request.ParseFromArray(data, static_cast<int>(size))) {
+                LOGIN_LOG_WARN("failed to parse LoginAuthReq from {}", conn->RemoteAddress());
+                return;
+            }
+            auto response = player_handler->Process(request, conn->RemoteAddress());
+            auto packet = slg::application::protocol::EncodeMessage(
+                static_cast<std::uint32_t>(client::CMD_LOGIN_AUTH_RES), response, 0,
+                header.sequence);
+            conn->AsyncSend(packet);
+        });
+
+    player_registry->Register(
+        static_cast<std::uint32_t>(client::CMD_HEARTBEAT_REQ),
+        [](const slg::application::protocol::PacketHeader& header,
+           const slg::network::tcp::TcpConnectionPtr& conn,
+           const std::uint8_t* data,
+           std::size_t size) {
+            common::HeartbeatReq heartbeat_req;
+            if (!heartbeat_req.ParseFromArray(data, static_cast<int>(size))) {
+                LOGIN_LOG_WARN("invalid heartbeat from {}", conn->RemoteAddress());
+                return;
+            }
+            common::HeartbeatRes heartbeat_res;
+            heartbeat_res.set_client_timestamp(heartbeat_req.client_timestamp());
+            heartbeat_res.set_server_timestamp(CurrentTimestampMs());
+            conn->AsyncSend(slg::application::protocol::EncodeMessage(
+                static_cast<std::uint32_t>(client::CMD_HEARTBEAT_RES), heartbeat_res, 0,
+                header.sequence));
+        });
+
+    auto internal_registry = std::make_shared<protocol::ProtocolRegistry>();
+    internal_registry->Register(
+        static_cast<std::uint32_t>(client::CMD_HEARTBEAT_REQ),
+        [internal_handler](const slg::application::protocol::PacketHeader& header,
+                           const slg::network::tcp::TcpConnectionPtr& conn,
+                           const std::uint8_t* data,
+                           std::size_t size) {
+            common::HeartbeatReq heartbeat_req;
+            if (!heartbeat_req.ParseFromArray(data, static_cast<int>(size))) {
+                LOGIN_LOG_WARN("invalid internal heartbeat from {}", conn->RemoteAddress());
+                return;
+            }
+            auto res = internal_handler->HandleHeartbeat(heartbeat_req, conn->RemoteAddress());
+            conn->AsyncSend(slg::application::protocol::EncodeMessage(
+                static_cast<std::uint32_t>(client::CMD_HEARTBEAT_RES), res, 0,
+                header.sequence));
+        });
+
+    auto player_router = std::make_shared<protocol::TcpProtocolRouter>(player_registry);
+    auto internal_router = std::make_shared<protocol::TcpProtocolRouter>(internal_registry);
+
+    app_instance.RegisterListenerHandler(
+        "player_handler",
+        [player_router](const slg::network::tcp::TcpConnectionPtr& conn) {
+            player_router->OnAccept(conn);
+        },
+        [player_router](const slg::network::tcp::TcpConnectionPtr& conn,
+                        const std::uint8_t* data,
+                        std::size_t size) {
+            player_router->OnReceive(conn, data, size);
+        },
+        [player_router](const slg::network::tcp::TcpConnectionPtr& conn,
+                        const boost::system::error_code& ec) {
+            player_router->OnError(conn, ec);
+        });
+
+    app_instance.RegisterListenerHandler(
+        "internal_handler",
+        [internal_router](const slg::network::tcp::TcpConnectionPtr& conn) {
+            internal_router->OnAccept(conn);
+        },
+        [internal_router](const slg::network::tcp::TcpConnectionPtr& conn,
+                          const std::uint8_t* data,
+                          std::size_t size) {
+            internal_router->OnReceive(conn, data, size);
+        },
+        [internal_router](const slg::network::tcp::TcpConnectionPtr& conn,
+                          const boost::system::error_code& ec) {
+            internal_router->OnError(conn, ec);
+        });
 }
 
 }  // namespace
@@ -194,19 +274,21 @@ int main(int argc, const char* argv[]) {
         InitializeLogging(app_instance.Config());
         auto service_config = LoadServiceConfig(app_instance.Config());
         ApplyServiceContext(service_config);
-        auto config = LoadLoginConfig(app_instance.Config());
         auto service_options = LoadLoginServiceOptions(app_instance.Config());
         if (auto snowflake = app_instance.GetSnowflakeConfig()) {
             service_options.snowflake.datacenter_id = snowflake->datacenter_id;
             service_options.snowflake.worker_id = snowflake->worker_id;
         }
-        LogStartupInfo(config, service_config);
-        g_login_service = std::make_unique<login::LoginService>(
+
+        g_login_service = std::make_shared<login::LoginService>(
             app_instance.TcpContext().GetContext(), std::move(service_options));
-        if (!g_login_service->Start(config.host, config.port)) {
-            throw std::runtime_error("failed to start login HTTP server");
+        LogStartupInfo(service_config);
+
+        RegisterTcpHandlers(app_instance, g_login_service);
+        if (!app_instance.StartListeners()) {
+            throw std::runtime_error("failed to start login listeners");
         }
-        LOGIN_LOG_INFO("login service started");
+        LOGIN_LOG_INFO("login tcp listeners started");
     });
 
     application.SetStopHook([](app::Application&) {
@@ -219,10 +301,7 @@ int main(int argc, const char* argv[]) {
     });
 
     application.SetShutdownHook([](app::Application&) {
-        if (g_login_service) {
-            g_login_service->Stop();
-            g_login_service.reset();
-        }
+        g_login_service.reset();
         g_received_signal.store(0, std::memory_order_relaxed);
         LOGIN_LOG_INFO("login service shutdown complete");
     });

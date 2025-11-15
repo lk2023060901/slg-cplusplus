@@ -7,12 +7,19 @@ endif()
 
 set(SLG_APPLICATION_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/application.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/message_codec.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/protocol_registry.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/tcp_protocol_router.cpp
 )
 
 set(SLG_APPLICATION_PUBLIC_HEADERS
     ${PROJECT_SOURCE_DIR}/include/application/application.h
     ${PROJECT_SOURCE_DIR}/include/application/application_export.h
     ${PROJECT_SOURCE_DIR}/include/application/dependency_container.h
+    ${PROJECT_SOURCE_DIR}/include/application/protocol/length_prefixed_reader.h
+    ${PROJECT_SOURCE_DIR}/include/application/protocol/message_codec.h
+    ${PROJECT_SOURCE_DIR}/include/application/protocol/protocol_registry.h
+    ${PROJECT_SOURCE_DIR}/include/application/protocol/tcp_protocol_router.h
 )
 
 set(CXXOPTS_DIR ${PROJECT_SOURCE_DIR}/third_party/cxxopts-3.3.1/include)
@@ -28,6 +35,9 @@ function(slg_application_define_library target_name lib_type)
             $<INSTALL_INTERFACE:include>
             ${CXXOPTS_DIR}
             ${NLOHMANN_DIR}
+            ${PROJECT_SOURCE_DIR}/third_party/protobuf-33.1/src
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/third_party/protobuf-33.1/src
     )
 
     target_compile_features(${target_name} PUBLIC cxx_std_17)
