@@ -1,9 +1,12 @@
 #include <atomic>
+#include <cstdint>
 #include <csignal>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "application/application.h"
@@ -11,6 +14,7 @@
 #include "logging/logging_config.h"
 #include "logging/logging_manager.h"
 #include "login/logging_macros.h"
+#include "login/login_service.h"
 #include "login_build_info.h"
 
 namespace app = slg::application;
@@ -20,6 +24,7 @@ namespace logging = slg::logging;
 namespace {
 
 std::atomic<int> g_received_signal{0};
+std::unique_ptr<login::LoginService> g_login_service;
 
 struct LoginConfig {
     std::string host{"0.0.0.0"};
@@ -32,6 +37,83 @@ struct ServiceConfig {
     std::string name{"login-service"};
     int shard_id{0};
 };
+
+login::LoginService::PlatformAuthConfig LoadPlatformAuthConfig(const json::JsonValue& root) {
+    auto platform_section = root.Get("platform_auth");
+    if (!platform_section.has_value() || !platform_section->IsObject()) {
+        throw std::runtime_error("Missing 'platform_auth' configuration section");
+    }
+
+    login::LoginService::PlatformAuthConfig cfg;
+    if (auto host = platform_section->GetAs<std::string>("host")) {
+        cfg.host = *host;
+    }
+    if (auto port = platform_section->GetAs<std::uint16_t>("port")) {
+        cfg.port = *port;
+    }
+    if (auto path = platform_section->GetAs<std::string>("path")) {
+        cfg.path = *path;
+    }
+    if (auto use_tls = platform_section->GetAs<bool>("use_tls")) {
+        cfg.use_tls = *use_tls;
+    }
+    if (auto timeout = platform_section->GetAs<std::uint32_t>("timeout_ms")) {
+        cfg.timeout_ms = *timeout;
+    }
+    if (auto app_id = platform_section->GetAs<std::string>("app_id")) {
+        cfg.app_id = *app_id;
+    }
+    if (auto secret = platform_section->GetAs<std::string>("app_secret")) {
+        cfg.app_secret = *secret;
+    }
+
+    if (cfg.host.empty() || cfg.port == 0 || cfg.app_id.empty()) {
+        throw std::runtime_error("Invalid platform_auth configuration");
+    }
+
+    if (cfg.path.empty()) {
+        cfg.path = "/platform/auth";
+    }
+    return cfg;
+}
+
+std::vector<login::LoginService::ServerInfo> LoadServerInfo(const json::JsonValue& root) {
+    auto servers_section = root.Get("servers");
+    if (!servers_section.has_value() || !servers_section->IsArray()) {
+        throw std::runtime_error("Missing 'servers' configuration array");
+    }
+
+    std::vector<login::LoginService::ServerInfo> servers;
+    for (std::size_t i = 0; i < servers_section->Raw().size(); ++i) {
+        auto item = servers_section->Get(i);
+        if (!item.has_value() || !item->IsObject()) {
+            continue;
+        }
+        auto id = item->GetAs<std::string>("id");
+        if (!id || id->empty()) {
+            continue;
+        }
+        login::LoginService::ServerInfo server;
+        server.id = *id;
+        server.name = item->GetAs<std::string>("name").value_or(server.id);
+        server.region_code = item->GetAs<std::string>("region_code").value_or("global");
+        server.online = item->GetAs<bool>("online").value_or(true);
+        servers.push_back(std::move(server));
+    }
+
+    if (servers.empty()) {
+        throw std::runtime_error("At least one server must be configured");
+    }
+
+    return servers;
+}
+
+login::LoginService::Options LoadLoginServiceOptions(const json::JsonValue& root) {
+    login::LoginService::Options options;
+    options.platform = LoadPlatformAuthConfig(root);
+    options.servers = LoadServerInfo(root);
+    return options;
+}
 
 LoginConfig LoadLoginConfig(const json::JsonValue& root) {
     auto login_section = root.Get("login");
@@ -113,7 +195,17 @@ int main(int argc, const char* argv[]) {
         auto service_config = LoadServiceConfig(app_instance.Config());
         ApplyServiceContext(service_config);
         auto config = LoadLoginConfig(app_instance.Config());
+        auto service_options = LoadLoginServiceOptions(app_instance.Config());
+        if (auto snowflake = app_instance.GetSnowflakeConfig()) {
+            service_options.snowflake.datacenter_id = snowflake->datacenter_id;
+            service_options.snowflake.worker_id = snowflake->worker_id;
+        }
         LogStartupInfo(config, service_config);
+        g_login_service = std::make_unique<login::LoginService>(
+            app_instance.TcpContext().GetContext(), std::move(service_options));
+        if (!g_login_service->Start(config.host, config.port)) {
+            throw std::runtime_error("failed to start login HTTP server");
+        }
         LOGIN_LOG_INFO("login service started");
     });
 
@@ -127,6 +219,10 @@ int main(int argc, const char* argv[]) {
     });
 
     application.SetShutdownHook([](app::Application&) {
+        if (g_login_service) {
+            g_login_service->Stop();
+            g_login_service.reset();
+        }
         g_received_signal.store(0, std::memory_order_relaxed);
         LOGIN_LOG_INFO("login service shutdown complete");
     });

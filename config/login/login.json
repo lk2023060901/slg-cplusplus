@@ -1,15 +1,61 @@
 {
-  "login": {
-    "host": "0.0.0.0",
-    "port": 57001,
-    "max_connections": 8192,
-    "io_threads": 2,
-    "description": "Example configuration for the C++ login service"
-  },
   "service": {
     "name": "login-service",
     "shard_id": 1
   },
+  "platform_auth": {
+    "host": "127.0.0.1",
+    "port": 8088,
+    "path": "/platform/auth/verify",
+    "use_tls": false,
+    "timeout_ms": 2000,
+    "app_id": "slg-login",
+    "app_secret": "development-secret"
+  },
+  "snowflake": {
+    "datacenter_id": 1,
+    "worker_id": 42
+  },
+  "listeners": [
+    {
+      "name": "login-tcp",
+      "host": "0.0.0.0",
+      "port": 58000,
+      "max_connections": 8192,
+      "io_threads": 2,
+      "type": "tcp",
+      "handler": "login_tcp_handler",
+      "read_buffer_size": 4096
+    }
+  ],
+  "connectors": [
+    {
+      "name": "gateway-link",
+      "host": "127.0.0.1",
+      "port": 58001,
+      "type": "tcp",
+      "handler": "gateway_connector",
+      "reconnect": {
+        "interval_ms": 1000,
+        "max_interval_ms": 15000,
+        "backoff_multiplier": 2.0
+      }
+    }
+  ],
+  "servers": [
+    {
+      "id": "s1001",
+      "region_code": "asia-1",
+      "name": "S1001-巨龙试炼",
+      "online": true
+    },
+    {
+      "id": "s1002",
+      "region_code": "europe-1",
+      "name": "S1002-冰封峡谷",
+      "online": false
+    }
+  ],
   "logging": {
     "loggers": [
       {
