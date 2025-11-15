@@ -232,9 +232,36 @@ bool Application::StartSingleListener(const ListenerConfig& config,
     }
 
     try {
+        const std::string listener_identifier = config.name.empty() ? config.handler : config.name;
         auto server = std::make_shared<tcp::TcpServer>(
             tcp_context_->GetContext(), boost::asio::ip::tcp::endpoint(address, config.port));
-        server->Start(handler.on_accept, handler.on_receive, handler.on_error, config.read_buffer_size);
+        auto on_accept = handler.on_accept;
+        auto on_receive = handler.on_receive;
+        auto on_error = handler.on_error;
+        auto listener_name = listener_identifier;
+        server->Start(
+            [this, on_accept, listener_name](const tcp::TcpConnectionPtr& conn) {
+                const auto id = next_connection_id_.fetch_add(1, std::memory_order_relaxed);
+                conn->SetConnectionId(id);
+                conn->SetListenerName(listener_name);
+                TrackListenerConnection(listener_name, conn);
+                if (on_accept) {
+                    on_accept(conn);
+                }
+            },
+            [on_receive](const tcp::TcpConnectionPtr& conn, const std::uint8_t* data, std::size_t size) {
+                if (on_receive) {
+                    on_receive(conn, data, size);
+                }
+            },
+            [this, on_error, listener_name](const tcp::TcpConnectionPtr& conn,
+                                            const boost::system::error_code& ec) {
+                RemoveListenerConnection(listener_name, conn);
+                if (on_error) {
+                    on_error(conn, ec);
+                }
+            },
+            config.read_buffer_size);
         managed_listeners_.push_back(server);
         return true;
     } catch (const std::exception& ex) {
@@ -767,6 +794,67 @@ std::shared_ptr<protocol::SecurityContext> Application::CreateConnectorSecurityC
         }
     }
     return CreateSecurityContext(crypto, crypto_key, crypto_iv, compression, compression_min_bytes);
+}
+
+std::vector<tcp::TcpConnectionPtr> Application::GetListenerConnections(
+    std::string_view listener_name) const {
+    std::vector<tcp::TcpConnectionPtr> result;
+    std::lock_guard<std::mutex> lock(listener_connections_mutex_);
+    auto iter = listener_connections_.find(std::string(listener_name));
+    if (iter == listener_connections_.end()) {
+        return result;
+    }
+    result.reserve(iter->second.connections.size());
+    for (const auto& [id, conn] : iter->second.connections) {
+        result.push_back(conn);
+    }
+    return result;
+}
+
+tcp::TcpConnectionPtr Application::GetListenerConnection(std::string_view listener_name,
+                                                          std::uint64_t connection_id) const {
+    std::lock_guard<std::mutex> lock(listener_connections_mutex_);
+    auto iter = listener_connections_.find(std::string(listener_name));
+    if (iter == listener_connections_.end()) {
+        return nullptr;
+    }
+    auto conn_iter = iter->second.connections.find(connection_id);
+    if (conn_iter == iter->second.connections.end()) {
+        return nullptr;
+    }
+    return conn_iter->second;
+}
+
+bool Application::CloseListenerConnection(std::string_view listener_name,
+                                          std::uint64_t connection_id) {
+    auto connection = GetListenerConnection(listener_name, connection_id);
+    if (!connection) {
+        return false;
+    }
+    connection->Close();
+    return true;
+}
+
+void Application::TrackListenerConnection(const std::string& listener_name,
+                                          const tcp::TcpConnectionPtr& connection) {
+    if (!connection) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(listener_connections_mutex_);
+    listener_connections_[listener_name].connections[connection->ConnectionId()] = connection;
+}
+
+void Application::RemoveListenerConnection(const std::string& listener_name,
+                                           const tcp::TcpConnectionPtr& connection) {
+    if (!connection) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(listener_connections_mutex_);
+    auto iter = listener_connections_.find(listener_name);
+    if (iter == listener_connections_.end()) {
+        return;
+    }
+    iter->second.connections.erase(connection->ConnectionId());
 }
 
 void Application::SignalHandlerThunk(int signal_number) {

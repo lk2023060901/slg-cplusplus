@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -9,6 +11,7 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
+#include <boost/system/error_code.hpp>
 
 #include "network/http/http_export.h"
 
@@ -38,6 +41,16 @@ public:
                                         bool use_tls = false,
                                         std::chrono::milliseconds timeout =
                                             std::chrono::seconds(5));
+
+    using AsyncHandler =
+        std::function<void(const boost::system::error_code&, std::optional<HttpResponse>)>;
+
+    void AsyncRequest(HttpRequest request,
+                      const std::string& host,
+                      unsigned short port,
+                      bool use_tls,
+                      std::chrono::milliseconds timeout,
+                      AsyncHandler handler);
 
 private:
     asio::io_context& io_context_;

@@ -4,13 +4,71 @@
 
 #include <boost/beast/http.hpp>
 
+#include "application/protocol/protocol_registry.h"
+#include "application/protocol/security_context.h"
+#include "application/protocol/tcp_protocol_router.h"
+#include "client/enums.pb.h"
+#include "common/common.pb.h"
 #include "json/json_reader.h"
 #include "json/json_value.h"
 #include "logging_macros.h"
+#include "network/tcp/tcp_connection.h"
 
 namespace json = slg::json;
 
 namespace login {
+
+namespace {
+
+std::uint64_t CurrentTimestampMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+slg::application::protocol::CommandHandler OnLoginAuth(
+    const std::shared_ptr<PlayerLoginHandler>& handler,
+    const std::shared_ptr<slg::application::protocol::SecurityContext>& security_context) {
+    return [handler, security_context](const slg::application::protocol::PacketHeader& header,
+                                      const slg::network::tcp::TcpConnectionPtr& conn,
+                                      const std::uint8_t* data,
+                                      std::size_t size) {
+        login::LoginAuthReq request;
+        if (!request.ParseFromArray(data, static_cast<int>(size))) {
+            LOGIN_LOG_WARN("failed to parse LoginAuthReq from {}", conn->RemoteAddress());
+            return;
+        }
+        auto sequence = header.sequence;
+        auto connection = conn;
+        handler->ProcessAsync(
+            request, conn->RemoteAddress(),
+            [security_context, connection, sequence](LoginAuthRes response) {
+                connection->AsyncSend(security_context->EncodeMessage(
+                    static_cast<std::uint32_t>(client::CMD_LOGIN_AUTH_RES), response, sequence));
+            });
+    };
+}
+
+slg::application::protocol::CommandHandler OnPlayerHeartbeat(
+    const std::shared_ptr<slg::application::protocol::SecurityContext>& security_context) {
+    return [security_context](const slg::application::protocol::PacketHeader& header,
+                             const slg::network::tcp::TcpConnectionPtr& conn,
+                             const std::uint8_t* data,
+                             std::size_t size) {
+        common::HeartbeatReq heartbeat_req;
+        if (!heartbeat_req.ParseFromArray(data, static_cast<int>(size))) {
+            LOGIN_LOG_WARN("invalid heartbeat from {}", conn->RemoteAddress());
+            return;
+        }
+        common::HeartbeatRes heartbeat_res;
+        heartbeat_res.set_client_timestamp(heartbeat_req.client_timestamp());
+        heartbeat_res.set_server_timestamp(CurrentTimestampMs());
+        conn->AsyncSend(security_context->EncodeMessage(
+            static_cast<std::uint32_t>(client::CMD_HEARTBEAT_RES), heartbeat_res,
+            header.sequence));
+    };
+}
+
+}  // namespace
 
 PlayerLoginHandler::PlayerLoginHandler(Dependencies deps) : deps_(deps) {}
 
@@ -25,55 +83,63 @@ const LoginService::ServerInfo* PlayerLoginHandler::FindServer(std::string_view 
     return &iter->second;
 }
 
-LoginAuthRes PlayerLoginHandler::Process(const LoginAuthReq& request,
-                                         const std::string& client_ip) {
+void PlayerLoginHandler::ProcessAsync(const LoginAuthReq& request,
+                                      const std::string& client_ip,
+                                      LoginAuthCallback callback) {
     LoginAuthRes response;
     response.set_selected_server_id(request.selected_server_id());
 
     const auto* server = FindServer(request.selected_server_id());
     if (!server) {
         response.set_err_code(common::ERROR_LOGIN_SERVER_NOT_FOUND);
-        return response;
+        callback(std::move(response));
+        return;
     }
     if (!server->online) {
         response.set_err_code(common::ERROR_LOGIN_SERVER_UNAVAILABLE);
-        return response;
+        callback(std::move(response));
+        return;
     }
 
     if (request.account_id().empty() || request.access_token().empty()) {
         response.set_err_code(common::ERROR_LOGIN_INVALID_TOKEN);
-        return response;
+        callback(std::move(response));
+        return;
     }
 
-    const auto verify_result = VerifyWithPlatform(request, *server, client_ip);
-    if (!verify_result.success) {
-        response.set_err_code(common::ERROR_LOGIN_INVALID_TOKEN);
-        return response;
-    }
-    if (verify_result.banned) {
-        response.set_err_code(common::ERROR_LOGIN_ACCOUNT_BANNED);
-        return response;
-    }
-
-    if (verify_result.normalized_account_id.empty()) {
-        response.set_err_code(common::ERROR_LOGIN_INVALID_TOKEN);
-        return response;
-    }
-
-    response.set_err_code(common::ERROR_SUCCESS);
-    response.set_uid(verify_result.normalized_account_id.empty()
-                         ? std::to_string(deps_.snowflake.NextId())
-                         : verify_result.normalized_account_id);
-    response.set_selected_server_id(server->id);
-    return response;
+    VerifyWithPlatformAsync(
+        request, *server, client_ip,
+        [this, response = std::move(response), callback = std::move(callback), server](
+            PlatformVerifyResult verify_result) mutable {
+            if (!verify_result.success) {
+                response.set_err_code(common::ERROR_LOGIN_INVALID_TOKEN);
+                callback(std::move(response));
+                return;
+            }
+            if (verify_result.banned) {
+                response.set_err_code(common::ERROR_LOGIN_ACCOUNT_BANNED);
+                callback(std::move(response));
+                return;
+            }
+            if (verify_result.normalized_account_id.empty()) {
+                response.set_err_code(common::ERROR_LOGIN_INVALID_TOKEN);
+                callback(std::move(response));
+                return;
+            }
+            response.set_err_code(common::ERROR_SUCCESS);
+            response.set_uid(verify_result.normalized_account_id.empty()
+                                 ? std::to_string(deps_.snowflake.NextId())
+                                 : verify_result.normalized_account_id);
+            response.set_selected_server_id(server->id);
+            callback(std::move(response));
+        });
 }
 
-PlayerLoginHandler::PlatformVerifyResult PlayerLoginHandler::VerifyWithPlatform(
+void PlayerLoginHandler::VerifyWithPlatformAsync(
     const LoginAuthReq& request,
     const LoginService::ServerInfo& server,
-    const std::string& client_ip) {
-    PlatformVerifyResult result;
-
+    const std::string& client_ip,
+    std::function<void(PlatformVerifyResult)> callback) {
     slg::network::http::HttpRequest http_request{boost::beast::http::verb::post,
                                                  deps_.options.platform.path.empty()
                                                      ? "/platform/auth"
@@ -93,41 +159,57 @@ PlayerLoginHandler::PlatformVerifyResult PlayerLoginHandler::VerifyWithPlatform(
     http_request.prepare_payload();
 
     const auto timeout = std::chrono::milliseconds(deps_.options.platform.timeout_ms);
-    auto http_response = deps_.http_client.Request(std::move(http_request),
-                                                   deps_.options.platform.host,
-                                                   deps_.options.platform.port,
-                                                   deps_.options.platform.use_tls, timeout);
-    if (!http_response) {
-        LOGIN_LOG_WARN("platform verification HTTP request failed for account {}",
-                       request.account_id());
-        return result;
-    }
-    if (http_response->result() != boost::beast::http::status::ok) {
-        LOGIN_LOG_WARN("platform verification returned status {} for account {}",
-                       static_cast<unsigned>(http_response->result()), request.account_id());
-        return result;
-    }
+    deps_.http_client.AsyncRequest(
+        std::move(http_request), deps_.options.platform.host, deps_.options.platform.port,
+        deps_.options.platform.use_tls, timeout,
+        [request, callback = std::move(callback)](
+            const boost::system::error_code& ec,
+            std::optional<slg::network::http::HttpResponse> response) mutable {
+            PlatformVerifyResult result;
+            if (ec || !response) {
+                LOGIN_LOG_WARN("platform verification HTTP request failed for account {}",
+                               request.account_id());
+                callback(result);
+                return;
+            }
+            if (response->result() != boost::beast::http::status::ok) {
+                LOGIN_LOG_WARN("platform verification returned status {} for account {}",
+                               static_cast<unsigned>(response->result()), request.account_id());
+                callback(result);
+                return;
+            }
+            json::JsonReader reader;
+            auto parsed = reader.ParseString(response->body());
+            if (!parsed.has_value() || !parsed->IsObject()) {
+                LOGIN_LOG_WARN("platform verification body is not valid JSON");
+                callback(result);
+                return;
+            }
+            const bool success = parsed->GetAs<bool>("success").value_or(false);
+            const bool banned = parsed->GetAs<bool>("banned").value_or(false);
+            auto normalized = parsed->GetAs<std::string>("account_id")
+                                   .value_or(request.account_id());
+            if (!success) {
+                callback(result);
+                return;
+            }
+            result.success = true;
+            result.banned = banned;
+            result.normalized_account_id =
+                normalized.empty() ? request.account_id() : normalized;
+            callback(result);
+        });
+}
 
-    json::JsonReader reader;
-    auto parsed = reader.ParseString(http_response->body());
-    if (!parsed.has_value() || !parsed->IsObject()) {
-        LOGIN_LOG_WARN("platform verification body is not valid JSON");
-        return result;
-    }
+void RegisterPlayerProtocols(
+    const std::shared_ptr<PlayerLoginHandler>& handler,
+    const std::shared_ptr<slg::application::protocol::SecurityContext>& security_context,
+    slg::application::protocol::ProtocolRegistry& registry) {
+    registry.Register(static_cast<std::uint32_t>(client::CMD_LOGIN_AUTH_REQ),
+                      OnLoginAuth(handler, security_context));
 
-    const bool success = parsed->GetAs<bool>("success").value_or(false);
-    const bool banned = parsed->GetAs<bool>("banned").value_or(false);
-    auto normalized = parsed->GetAs<std::string>("account_id").value_or(request.account_id());
-
-    if (!success) {
-        return result;
-    }
-
-    result.success = true;
-    result.banned = banned;
-    result.normalized_account_id = normalized.empty() ? request.account_id() : normalized;
-    return result;
+    registry.Register(static_cast<std::uint32_t>(client::CMD_HEARTBEAT_REQ),
+                      OnPlayerHeartbeat(security_context));
 }
 
 }  // namespace login
-

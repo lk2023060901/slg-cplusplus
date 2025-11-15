@@ -179,6 +179,13 @@ public:
         std::string_view handler_name) const;
     SLG_APPLICATION_API std::shared_ptr<protocol::SecurityContext> CreateConnectorSecurityContext(
         std::string_view handler_name) const;
+    SLG_APPLICATION_API std::vector<tcp::TcpConnectionPtr> GetListenerConnections(
+        std::string_view listener_name) const;
+    SLG_APPLICATION_API tcp::TcpConnectionPtr GetListenerConnection(
+        std::string_view listener_name,
+        std::uint64_t connection_id) const;
+    SLG_APPLICATION_API bool CloseListenerConnection(std::string_view listener_name,
+                                                     std::uint64_t connection_id);
 
     SLG_APPLICATION_API bool StartListeners();
     SLG_APPLICATION_API bool StartConnectors();
@@ -248,6 +255,10 @@ private:
         const std::string& iv) const;
     std::shared_ptr<protocol::CompressionProcessor> CreateCompressionProcessor(
         const std::string& handler) const;
+    void TrackListenerConnection(const std::string& listener_name,
+                                 const tcp::TcpConnectionPtr& connection);
+    void RemoveListenerConnection(const std::string& listener_name,
+                                  const tcp::TcpConnectionPtr& connection);
 
     Options options_;
     DependencyContainer dependencies_;
@@ -285,6 +296,13 @@ private:
     std::size_t global_compression_min_bytes_{0};
     std::unordered_map<std::string, CryptoFactory> crypto_factories_;
     std::unordered_map<std::string, CompressionFactory> compression_factories_;
+    struct ListenerConnections {
+        std::unordered_map<std::uint64_t, tcp::TcpConnectionPtr> connections;
+    };
+
+    std::atomic<std::uint64_t> next_connection_id_{1};
+    mutable std::mutex listener_connections_mutex_;
+    std::unordered_map<std::string, ListenerConnections> listener_connections_;
 
     static Application* active_instance_;
 };

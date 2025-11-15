@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -10,6 +12,12 @@
 #include "login/login.pb.h"
 #include "login_service.h"
 #include "network/http/http_client.h"
+
+namespace slg::application::protocol {
+class SecurityContext;
+class ProtocolRegistry;
+class TcpProtocolRouter;
+}  // namespace slg::application::protocol
 
 namespace login {
 
@@ -22,11 +30,14 @@ public:
         const std::unordered_map<std::string, LoginService::ServerInfo>& server_lookup;
     };
 
+    using LoginAuthCallback = std::function<void(LoginAuthRes)>;
+
     explicit PlayerLoginHandler(Dependencies deps);
     ~PlayerLoginHandler() = default;
 
-    login::LoginAuthRes Process(const login::LoginAuthReq& request,
-                                const std::string& client_ip);
+    void ProcessAsync(const login::LoginAuthReq& request,
+                      const std::string& client_ip,
+                      LoginAuthCallback callback);
 
 private:
     struct PlatformVerifyResult {
@@ -36,11 +47,17 @@ private:
     };
 
     const LoginService::ServerInfo* FindServer(std::string_view server_id) const;
-    PlatformVerifyResult VerifyWithPlatform(const login::LoginAuthReq& request,
-                                            const LoginService::ServerInfo& server,
-                                            const std::string& client_ip);
+    void VerifyWithPlatformAsync(const login::LoginAuthReq& request,
+                                 const LoginService::ServerInfo& server,
+                                 const std::string& client_ip,
+                                 std::function<void(PlatformVerifyResult)> callback);
 
     Dependencies deps_;
 };
+
+void RegisterPlayerProtocols(
+    const std::shared_ptr<PlayerLoginHandler>& handler,
+    const std::shared_ptr<slg::application::protocol::SecurityContext>& security_context,
+    slg::application::protocol::ProtocolRegistry& registry);
 
 }  // namespace login

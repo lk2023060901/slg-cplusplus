@@ -43,6 +43,11 @@ public:
     SLG_TCP_API std::string RemoteAddress() const;
     SLG_TCP_API std::uint16_t RemotePort() const;
 
+    SLG_TCP_API void SetConnectionId(std::uint64_t id) noexcept;
+    SLG_TCP_API std::uint64_t ConnectionId() const noexcept;
+    SLG_TCP_API void SetListenerName(std::string name);
+    SLG_TCP_API const std::string& ListenerName() const noexcept;
+
 private:
     void DoRead();
     void HandleRead(const boost::system::error_code& ec, std::size_t bytes_transferred);
@@ -57,6 +62,8 @@ private:
     ReceiveHandler on_receive_;
     ErrorHandler on_error_;
     bool writing_{false};
+    std::uint64_t connection_id_{0};
+    std::string listener_name_;
 };
 
 using TcpConnectionPtr = std::shared_ptr<TcpConnection>;

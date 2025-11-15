@@ -82,6 +82,22 @@ std::uint16_t TcpConnection::RemotePort() const {
     return ec ? 0 : endpoint.port();
 }
 
+void TcpConnection::SetConnectionId(std::uint64_t id) noexcept {
+    connection_id_ = id;
+}
+
+std::uint64_t TcpConnection::ConnectionId() const noexcept {
+    return connection_id_;
+}
+
+void TcpConnection::SetListenerName(std::string name) {
+    listener_name_ = std::move(name);
+}
+
+const std::string& TcpConnection::ListenerName() const noexcept {
+    return listener_name_;
+}
+
 void TcpConnection::DoRead() {
     auto self = shared_from_this();
     socket_.async_read_some(

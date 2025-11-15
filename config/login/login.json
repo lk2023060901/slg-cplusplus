@@ -16,6 +16,11 @@
     "datacenter_id": 1,
     "worker_id": 42
   },
+  "crypto": {
+    "handler": "aes128",
+    "key": "00112233445566778899aabbccddeeff",
+    "iv": "0102030405060708090a0b0c0d0e0f"
+  },
   "compression": {
     "handler": "lz4",
     "min_bytes": 512
@@ -29,7 +34,16 @@
       "io_threads": 2,
       "type": "tcp",
       "handler": "player_handler",
-      "read_buffer_size": 4096
+      "read_buffer_size": 4096,
+      "crypto": {
+        "handler": "aes128",
+        "key": "10f1e2d3c4b5a6978877665544332211",
+        "iv": "1f1e1d1c1b1a19181716151413121110"
+      },
+      "compression": {
+        "handler": "lz4",
+        "min_bytes": 256
+      }
     },
     {
       "name": "internal-listener",
@@ -39,7 +53,16 @@
       "io_threads": 1,
       "type": "tcp",
       "handler": "internal_handler",
-      "read_buffer_size": 2048
+      "read_buffer_size": 2048,
+      "crypto": {
+        "handler": "aes128",
+        "key": "fedcba98765432100123456789abcdef",
+        "iv": "00112233445566778899aabbccddeeff"
+      },
+      "compression": {
+        "handler": "zstd",
+        "min_bytes": 128
+      }
     }
   ],
   "connectors": [
@@ -49,6 +72,15 @@
       "port": 58001,
       "type": "tcp",
       "handler": "gateway_connector",
+      "crypto": {
+        "handler": "aes128",
+        "key": "abcdef0123456789fedcba9876543210",
+        "iv": "0f0e0d0c0b0a09080706050403020100"
+      },
+      "compression": {
+        "handler": "lz4",
+        "min_bytes": 1024
+      },
       "reconnect": {
         "interval_ms": 1000,
         "max_interval_ms": 15000,
