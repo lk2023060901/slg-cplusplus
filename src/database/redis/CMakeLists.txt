@@ -24,9 +24,12 @@ set(HIREDIS_SOURCES
 add_library(thirdparty_hiredis STATIC ${HIREDIS_SOURCES})
 set(HIREDIS_GENERATED_INCLUDE ${CMAKE_BINARY_DIR}/generated/hiredis)
 file(MAKE_DIRECTORY ${HIREDIS_GENERATED_INCLUDE}/hiredis)
+file(MAKE_DIRECTORY ${HIREDIS_GENERATED_INCLUDE}/hiredis/adapters)
 foreach(header hiredis.h read.h sds.h async.h alloc.h sockcompat.h)
     configure_file(${HIREDIS_ROOT}/${header} ${HIREDIS_GENERATED_INCLUDE}/hiredis/${header} COPYONLY)
 endforeach()
+configure_file(${HIREDIS_ROOT}/adapters/libuv.h
+               ${HIREDIS_GENERATED_INCLUDE}/hiredis/adapters/libuv.h COPYONLY)
 target_include_directories(thirdparty_hiredis PUBLIC ${HIREDIS_ROOT} ${HIREDIS_GENERATED_INCLUDE})
 if(APPLE)
     target_link_libraries(thirdparty_hiredis PUBLIC iconv)
@@ -36,10 +39,17 @@ set(REDIS_PLUS_PLUS_ROOT ${PROJECT_SOURCE_DIR}/third_party/redis-plus-plus-1.3.1
 set(REDIS_PLUS_PLUS_INCLUDE ${REDIS_PLUS_PLUS_ROOT})
 set(REDIS_PLUS_PLUS_CXX17 ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/cxx17)
 set(REDIS_PLUS_PLUS_TLS ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/no_tls)
+set(REDIS_PLUS_PLUS_FUTURE_STD ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/future/std)
 set(REDIS_PLUS_PLUS_GENERATED ${CMAKE_BINARY_DIR}/generated/redis_plus_plus)
 file(MAKE_DIRECTORY ${REDIS_PLUS_PLUS_GENERATED}/sw/redis++)
 configure_file(${PROJECT_SOURCE_DIR}/third_party/redis-plus-plus-1.3.15/hiredis_features.h.in
                ${REDIS_PLUS_PLUS_GENERATED}/sw/redis++/hiredis_features.h @ONLY)
+
+set(LIBUV_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/third_party/libuv-1.51.0/include)
+if(NOT TARGET uv_a)
+    message(FATAL_ERROR "libuv target uv_a not found. Ensure third_party/libuv-1.51.0 is added to the build.")
+endif()
+set(LIBUV_LIBRARY_TARGET uv_a)
 
 set(SLG_REDIS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/redis_client.cpp
@@ -63,6 +73,15 @@ set(REDIS_PLUS_PLUS_SOURCES
     ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/shards_pool.cpp
     ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/subscriber.cpp
     ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/transaction.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/event_loop.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_connection.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_connection_pool.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_redis.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_redis_cluster.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_sentinel.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_shards_pool.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_subscriber.cpp
+    ${REDIS_PLUS_PLUS_ROOT}/sw/redis++/async_subscriber_impl.cpp
 )
 
 list(APPEND SLG_REDIS_SOURCES ${REDIS_PLUS_PLUS_SOURCES})
@@ -84,14 +103,22 @@ function(slg_redis_define_library target_name lib_type)
             ${REDIS_PLUS_PLUS_INCLUDE}
             ${REDIS_PLUS_PLUS_CXX17}
             ${REDIS_PLUS_PLUS_TLS}
+            ${REDIS_PLUS_PLUS_FUTURE_STD}
             ${REDIS_PLUS_PLUS_GENERATED}
             ${PROJECT_SOURCE_DIR}/third_party/nlohmann-json-3.12.0/include
             ${HIREDIS_ROOT}
             ${HIREDIS_GENERATED_INCLUDE}
+            ${LIBUV_INCLUDE_DIR}
     )
 
     target_compile_features(${target_name} PUBLIC cxx_std_17)
-    target_link_libraries(${target_name} PUBLIC thirdparty_hiredis slg_json_static)
+    target_link_libraries(${target_name} PUBLIC thirdparty_hiredis slg_json_static ${LIBUV_LIBRARY_TARGET})
+
+    if(TARGET slg_coroutine_static)
+        target_link_libraries(${target_name} PUBLIC slg_coroutine_static)
+    elseif(TARGET slg_coroutine_shared)
+        target_link_libraries(${target_name} PUBLIC slg_coroutine_shared)
+    endif()
 
     if(lib_type STREQUAL "SHARED")
         target_compile_definitions(${target_name}

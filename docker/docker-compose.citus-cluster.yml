@@ -1,0 +1,43 @@
+version: "3.8"
+
+# Coordinator + 2 worker nodes for Citus-specific integration tests.
+services:
+  citus-coordinator:
+    image: citusdata/citus:12.1
+    container_name: citus-coordinator
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: citus
+      POSTGRES_USER: postgres
+      POSTGRES_DB: citus
+      CITUS_SEEDS: "citus-coordinator,citus-worker1,citus-worker2"
+    command: ["docker-entrypoint.sh", "postgres", "-c", "shared_preload_libraries=citus"]
+    ports:
+      - "55432:5432"
+    depends_on:
+      - citus-worker1
+      - citus-worker2
+
+  citus-worker1:
+    image: citusdata/citus:12.1
+    container_name: citus-worker1
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: citus
+      POSTGRES_USER: postgres
+      POSTGRES_DB: citus
+      CITUS_NODE_NAME: citus-worker1
+      CITUS_SEEDS: "citus-coordinator,citus-worker1,citus-worker2"
+    command: ["docker-entrypoint.sh", "postgres", "-c", "shared_preload_libraries=citus"]
+
+  citus-worker2:
+    image: citusdata/citus:12.1
+    container_name: citus-worker2
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: citus
+      POSTGRES_USER: postgres
+      POSTGRES_DB: citus
+      CITUS_NODE_NAME: citus-worker2
+      CITUS_SEEDS: "citus-coordinator,citus-worker1,citus-worker2"
+    command: ["docker-entrypoint.sh", "postgres", "-c", "shared_preload_libraries=citus"]

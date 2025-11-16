@@ -39,6 +39,18 @@ function(slg_citus_define_library target_name lib_type)
     target_compile_features(${target_name} PUBLIC cxx_std_17)
     target_link_libraries(${target_name} PUBLIC ${PostgreSQL_LIBRARIES} slg_json_static)
 
+    if(TARGET slg_coroutine_static)
+        target_link_libraries(${target_name} PUBLIC slg_coroutine_static)
+    elseif(TARGET slg_coroutine_shared)
+        target_link_libraries(${target_name} PUBLIC slg_coroutine_shared)
+    endif()
+
+    if(TARGET slg_tcp_static)
+        target_link_libraries(${target_name} PUBLIC slg_tcp_static)
+    elseif(TARGET slg_tcp_shared)
+        target_link_libraries(${target_name} PUBLIC slg_tcp_shared)
+    endif()
+
     if(lib_type STREQUAL "SHARED")
         target_compile_definitions(${target_name}
             PRIVATE SLG_CITUS_BUILD_SHARED

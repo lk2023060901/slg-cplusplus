@@ -1,0 +1,20 @@
+version: "3.8"
+
+# 6-node Redis Cluster for advanced stream/consumer-group testing.
+services:
+  redis-cluster:
+    image: bitnami/redis-cluster:7.2
+    container_name: redis-cluster
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: slgpass
+      REDISCLI_AUTH: slgpass
+      REDIS_CLUSTER_REPLICAS: 1
+    ports:
+      - "7000-7005:7000-7005"
+    volumes:
+      - redis-cluster-data:/bitnami
+
+volumes:
+  redis-cluster-data:
+    driver: local

@@ -1,19 +1,14 @@
 #pragma once
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-  #if defined(SLG_HTTP_SHARED)
+#if defined(_WIN32)
     #if defined(SLG_HTTP_BUILD_SHARED)
-      #define SLG_HTTP_API __declspec(dllexport)
+        #define SLG_HTTP_API __declspec(dllexport)
+    #elif defined(SLG_HTTP_SHARED)
+        #define SLG_HTTP_API __declspec(dllimport)
     #else
-      #define SLG_HTTP_API __declspec(dllimport)
+        #define SLG_HTTP_API
     #endif
-  #else
-    #define SLG_HTTP_API
-  #endif
-#elif defined(__GNUC__) && __GNUC__ >= 4
-  #define SLG_HTTP_API __attribute__((visibility("default")))
 #else
-  #define SLG_HTTP_API
+    #define SLG_HTTP_API
 #endif
 
-namespace slg::network::http {}

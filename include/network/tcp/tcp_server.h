@@ -23,7 +23,8 @@ public:
     SLG_TCP_API void Start(AcceptHandler on_accept,
                            TcpConnection::ReceiveHandler on_receive,
                            TcpConnection::ErrorHandler on_error,
-                           std::size_t read_buffer_size = kDefaultReadBufferSize);
+                           std::size_t read_buffer_size = kDefaultReadBufferSize,
+                           bool auto_start = true);
 
     SLG_TCP_API void Stop();
     SLG_TCP_API bool IsRunning() const noexcept;
@@ -37,6 +38,7 @@ private:
     TcpConnection::ReceiveHandler on_receive_;
     TcpConnection::ErrorHandler on_error_;
     std::size_t read_buffer_size_{kDefaultReadBufferSize};
+    bool auto_start_{true};
     bool running_{false};
 };
 

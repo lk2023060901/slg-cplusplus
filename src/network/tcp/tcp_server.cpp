@@ -16,11 +16,13 @@ TcpServer::TcpServer(boost::asio::io_context& io_context,
 void TcpServer::Start(AcceptHandler on_accept,
                       TcpConnection::ReceiveHandler on_receive,
                       TcpConnection::ErrorHandler on_error,
-                      std::size_t read_buffer_size) {
+                      std::size_t read_buffer_size,
+                      bool auto_start) {
     on_accept_ = std::move(on_accept);
     on_receive_ = std::move(on_receive);
     on_error_ = std::move(on_error);
     read_buffer_size_ = read_buffer_size;
+    auto_start_ = auto_start;
     running_ = true;
     DoAccept();
 }
@@ -48,7 +50,9 @@ void TcpServer::DoAccept() {
             }
         } else {
             auto connection = std::make_shared<TcpConnection>(std::move(*socket));
-            connection->Start(read_buffer_size_, on_receive_, on_error_);
+            if (auto_start_) {
+                connection->Start(read_buffer_size_, on_receive_, on_error_);
+            }
             if (on_accept_) {
                 on_accept_(connection);
             }

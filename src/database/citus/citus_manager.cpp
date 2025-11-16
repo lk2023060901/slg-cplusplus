@@ -4,11 +4,29 @@
 
 namespace slg::database::citus {
 
-CitusManager::CitusManager(CitusConfig config) : config_(std::move(config)) {}
+CitusManager::CitusManager(CitusConfig config)
+    : CitusManager(std::move(config), nullptr, nullptr) {}
+
+CitusManager::CitusManager(CitusConfig config,
+                           std::shared_ptr<slg::network::tcp::TcpIoContext> io_context,
+                           std::shared_ptr<slg::coroutine::CoroutineScheduler> scheduler)
+    : config_(std::move(config)),
+      io_context_(std::move(io_context)),
+      scheduler_(std::move(scheduler)),
+      coordinator_(EnsureIoContext().GetContext(), EnsureScheduler()) {
+    EnsureIoContext().Start();
+}
 
 CitusManager::~CitusManager() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    coordinator_.Disconnect();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        coordinator_.Disconnect();
+    }
+
+    if (owns_io_context_ && io_context_) {
+        io_context_->Stop();
+        io_context_->Join();
+    }
 }
 
 bool CitusManager::Connect() {
@@ -129,6 +147,21 @@ bool CitusManager::RegisterBootstrapNodes() {
         ok &= RegisterWorker(node);
     }
     return ok;
+}
+
+slg::network::tcp::TcpIoContext& CitusManager::EnsureIoContext() {
+    if (!io_context_) {
+        io_context_ = std::make_shared<slg::network::tcp::TcpIoContext>(1);
+        owns_io_context_ = true;
+    }
+    return *io_context_;
+}
+
+slg::coroutine::CoroutineScheduler& CitusManager::EnsureScheduler() {
+    if (!scheduler_) {
+        scheduler_ = std::make_shared<slg::coroutine::CoroutineScheduler>();
+    }
+    return *scheduler_;
 }
 
 }  // namespace slg::database::citus

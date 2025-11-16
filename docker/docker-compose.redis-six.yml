@@ -1,0 +1,142 @@
+services:
+  redis-node-0:
+    image: redis:7.2
+    container_name: redis-node-0
+    restart: unless-stopped
+    ports:
+      - "10000:10000"
+      - "20000:20000"
+    volumes:
+      - ./redis-cluster/node-10000.conf:/redis.conf:ro
+      - redis-node-0-data:/data
+    command:
+      - "redis-server"
+      - "/redis.conf"
+      - "--cluster-announce-ip"
+      - "${SLG_HOST_IP:?Set SLG_HOST_IP}"
+      - "--cluster-announce-port"
+      - "10000"
+      - "--cluster-announce-bus-port"
+      - "20000"
+
+  redis-node-1:
+    image: redis:7.2
+    container_name: redis-node-1
+    restart: unless-stopped
+    ports:
+      - "10001:10001"
+      - "20001:20001"
+    volumes:
+      - ./redis-cluster/node-10001.conf:/redis.conf:ro
+      - redis-node-1-data:/data
+    command:
+      - "redis-server"
+      - "/redis.conf"
+      - "--cluster-announce-ip"
+      - "${SLG_HOST_IP:?Set SLG_HOST_IP}"
+      - "--cluster-announce-port"
+      - "10001"
+      - "--cluster-announce-bus-port"
+      - "20001"
+
+  redis-node-2:
+    image: redis:7.2
+    container_name: redis-node-2
+    restart: unless-stopped
+    ports:
+      - "10002:10002"
+      - "20002:20002"
+    volumes:
+      - ./redis-cluster/node-10002.conf:/redis.conf:ro
+      - redis-node-2-data:/data
+    command:
+      - "redis-server"
+      - "/redis.conf"
+      - "--cluster-announce-ip"
+      - "${SLG_HOST_IP:?Set SLG_HOST_IP}"
+      - "--cluster-announce-port"
+      - "10002"
+      - "--cluster-announce-bus-port"
+      - "20002"
+
+  redis-node-3:
+    image: redis:7.2
+    container_name: redis-node-3
+    restart: unless-stopped
+    ports:
+      - "10003:10003"
+      - "20003:20003"
+    volumes:
+      - ./redis-cluster/node-10003.conf:/redis.conf:ro
+      - redis-node-3-data:/data
+    command:
+      - "redis-server"
+      - "/redis.conf"
+      - "--cluster-announce-ip"
+      - "${SLG_HOST_IP:?Set SLG_HOST_IP}"
+      - "--cluster-announce-port"
+      - "10003"
+      - "--cluster-announce-bus-port"
+      - "20003"
+
+  redis-node-4:
+    image: redis:7.2
+    container_name: redis-node-4
+    restart: unless-stopped
+    ports:
+      - "10004:10004"
+      - "20004:20004"
+    volumes:
+      - ./redis-cluster/node-10004.conf:/redis.conf:ro
+      - redis-node-4-data:/data
+    command:
+      - "redis-server"
+      - "/redis.conf"
+      - "--cluster-announce-ip"
+      - "${SLG_HOST_IP:?Set SLG_HOST_IP}"
+      - "--cluster-announce-port"
+      - "10004"
+      - "--cluster-announce-bus-port"
+      - "20004"
+
+  redis-node-5:
+    image: redis:7.2
+    container_name: redis-node-5
+    restart: unless-stopped
+    ports:
+      - "10005:10005"
+      - "20005:20005"
+    volumes:
+      - ./redis-cluster/node-10005.conf:/redis.conf:ro
+      - redis-node-5-data:/data
+    command:
+      - "redis-server"
+      - "/redis.conf"
+      - "--cluster-announce-ip"
+      - "${SLG_HOST_IP:?Set SLG_HOST_IP}"
+      - "--cluster-announce-port"
+      - "10005"
+      - "--cluster-announce-bus-port"
+      - "20005"
+
+  redis-cluster-init:
+    image: redis:7.2
+    container_name: redis-cluster-init
+    depends_on:
+      - redis-node-0
+      - redis-node-1
+      - redis-node-2
+      - redis-node-3
+      - redis-node-4
+      - redis-node-5
+    volumes:
+      - ./redis-cluster/init-cluster.sh:/init-cluster.sh:ro
+    entrypoint: ["/bin/sh", "/init-cluster.sh"]
+
+volumes:
+  redis-node-0-data:
+  redis-node-1-data:
+  redis-node-2-data:
+  redis-node-3-data:
+  redis-node-4-data:
+  redis-node-5-data:

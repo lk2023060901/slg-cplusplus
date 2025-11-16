@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(slg_core VERSION 0.1.0 LANGUAGES C CXX)
 
+option(SLG_BUILD_TESTS "Build unit/performance tests" ON)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,11 +37,24 @@ set(RECASTNAVIGATION_TESTS OFF CACHE BOOL "Disable Recast tests" FORCE)
 set(RECASTNAVIGATION_EXAMPLES OFF CACHE BOOL "Disable Recast examples" FORCE)
 add_subdirectory(third_party/recastnavigation-1.6.0)
 
+set(LIBUV_BUILD_SHARED OFF CACHE BOOL "Disable libuv shared library" FORCE)
+set(LIBUV_BUILD_TESTS OFF CACHE BOOL "Disable libuv tests" FORCE)
+set(LIBUV_BUILD_BENCH OFF CACHE BOOL "Disable libuv benchmarks" FORCE)
+add_subdirectory(third_party/libuv-1.51.0)
+
+if(SLG_BUILD_TESTS)
+    set(BUILD_GMOCK OFF CACHE BOOL "Disable gmock build" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "Disable gtest install" FORCE)
+    add_subdirectory(third_party/googletest-1.17.0)
+    enable_testing()
+endif()
+
 # Core modules
 add_subdirectory(src/singleton)
 add_subdirectory(src/threading)
 add_subdirectory(src/network)
 add_subdirectory(src/datetime)
+add_subdirectory(src/coroutine)
 add_subdirectory(src/timer)
 add_subdirectory(src/application)
 add_subdirectory(src/database/citus)
@@ -50,3 +65,9 @@ add_subdirectory(src/navigation)
 
 # Services
 add_subdirectory(login)
+
+add_subdirectory(examples)
+
+if(SLG_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

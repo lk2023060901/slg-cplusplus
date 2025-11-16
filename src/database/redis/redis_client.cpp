@@ -3,68 +3,95 @@
 #include <chrono>
 #include <iterator>
 #include <stdexcept>
-#include <thread>
+
+#include <boost/fiber/operations.hpp>
 
 namespace slg::database::redis {
 
-RedisClient::RedisClient(RedisConfig config) : config_(std::move(config)) {}
+namespace {
+
+template <typename T>
+std::optional<T> ToStdOptional(const sw::redis::Optional<T>& value) {
+    if (value) {
+        return *value;
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+RedisClient::RedisClient(RedisConfig config)
+    : RedisClient(std::move(config), nullptr) {}
+
+RedisClient::RedisClient(RedisConfig config,
+                         std::shared_ptr<slg::coroutine::CoroutineScheduler> scheduler)
+    : config_(std::move(config)), scheduler_(std::move(scheduler)) {
+    if (!scheduler_) {
+        scheduler_ = std::make_shared<slg::coroutine::CoroutineScheduler>();
+        owns_scheduler_ = true;
+    }
+    event_loop_ = std::make_shared<sw::redis::EventLoop>();
+}
 
 RedisClient::~RedisClient() {
     Unsubscribe();
 }
 
 bool RedisClient::Connect() {
+    if (!event_loop_) {
+        event_loop_ = std::make_shared<sw::redis::EventLoop>();
+    }
+
     if (config_.cluster_mode) {
         auto pool_options = BuildPoolOptions();
+        async_cluster_.reset();
+        sync_cluster_.reset();
         for (const auto& endpoint : config_.endpoints) {
             try {
-                cluster_ = std::make_shared<sw::redis::RedisCluster>(BuildConnectionOptions(endpoint),
-                                                                     pool_options);
+                async_cluster_ = std::make_shared<sw::redis::AsyncRedisCluster>(
+                    BuildConnectionOptions(endpoint), pool_options, sw::redis::Role::MASTER,
+                    event_loop_);
+                sync_cluster_ = std::make_shared<sw::redis::RedisCluster>(
+                    BuildConnectionOptions(endpoint), pool_options);
                 break;
             } catch (const sw::redis::Error&) {
-                cluster_.reset();
+                async_cluster_.reset();
+                sync_cluster_.reset();
             }
         }
-        if (!cluster_) {
-            return false;
-        }
-    } else {
-        if (config_.endpoints.empty()) {
-            return false;
-        }
-        auto options = BuildConnectionOptions(config_.endpoints.front());
-        auto pool_options = BuildPoolOptions();
-        try {
-            redis_ = std::make_shared<sw::redis::Redis>(options, pool_options);
-        } catch (const sw::redis::Error&) {
-            redis_.reset();
-            return false;
-        }
+        return async_cluster_ != nullptr && sync_cluster_ != nullptr;
     }
+
+    if (config_.endpoints.empty()) {
+        return false;
+    }
+
+    auto options = BuildConnectionOptions(config_.endpoints.front());
+    auto pool_options = BuildPoolOptions();
+
+    try {
+        async_redis_ = std::make_shared<sw::redis::AsyncRedis>(options, pool_options, event_loop_);
+        sync_redis_ = std::make_shared<sw::redis::Redis>(options, pool_options);
+    } catch (const sw::redis::Error&) {
+        async_redis_.reset();
+        sync_redis_.reset();
+        return false;
+    }
+
     return true;
 }
 
 bool RedisClient::EnsureConnected() {
     if (config_.cluster_mode) {
-        if (!cluster_) {
+        if (!async_cluster_ || !sync_cluster_) {
             return Connect();
         }
     } else {
-        if (!redis_) {
+        if (!async_redis_ || !sync_redis_) {
             return Connect();
         }
     }
     return true;
-}
-
-std::shared_ptr<sw::redis::Redis> RedisClient::Standalone() {
-    EnsureConnected();
-    return redis_;
-}
-
-std::shared_ptr<sw::redis::RedisCluster> RedisClient::Cluster() {
-    EnsureConnected();
-    return cluster_;
 }
 
 bool RedisClient::Set(std::string_view key,
@@ -73,93 +100,53 @@ bool RedisClient::Set(std::string_view key,
     if (!EnsureConnected()) {
         return false;
     }
-
-    try {
-        auto writer = [ttl](auto& redis, std::string_view k, std::string_view v) {
-            if (ttl.count() > 0) {
-                redis.set(k, v, ttl);
-            } else {
-                redis.set(k, v);
-            }
-            return true;
-        };
-
-        if (config_.cluster_mode) {
-            if (!cluster_) {
-                return false;
-            }
-            writer(*cluster_, key, value);
-        } else {
-            if (!redis_) {
-                return false;
-            }
-            writer(*redis_, key, value);
-        }
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
-    return true;
+    auto future = config_.cluster_mode
+                      ? async_cluster_->set(key, value, ttl, sw::redis::UpdateType::ALWAYS)
+                      : async_redis_->set(key, value, ttl, sw::redis::UpdateType::ALWAYS);
+    return WaitFuture(std::move(future));
 }
 
 std::optional<std::string> RedisClient::Get(std::string_view key) {
     if (!EnsureConnected()) {
         return std::nullopt;
     }
-    try {
-        if (config_.cluster_mode) {
-            return cluster_->get(key);
-        }
-        return redis_->get(key);
-    } catch (const sw::redis::Error&) {
-        return std::nullopt;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->get(key) : async_redis_->get(key);
+    return ToStdOptional(WaitFuture(std::move(future)));
 }
 
 bool RedisClient::Del(std::string_view key) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        std::size_t removed = 0;
-        if (config_.cluster_mode) {
-            removed = cluster_->del(key);
-        } else {
-            removed = redis_->del(key);
-        }
-        return removed > 0;
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->del(key) : async_redis_->del(key);
+    return WaitFuture(std::move(future)) > 0;
 }
 
 bool RedisClient::AcquireLock(std::string_view key,
-                              std::string_view token,
-                              std::chrono::milliseconds ttl,
-                              std::chrono::milliseconds retry_interval,
-                              std::size_t max_retry) {
+                               std::string_view token,
+                               std::chrono::milliseconds ttl,
+                               std::chrono::milliseconds retry_interval,
+                               std::size_t max_retry) {
     if (!EnsureConnected()) {
         return false;
     }
 
-    auto try_set = [&](auto& redis) {
-        for (std::size_t attempt = 0; attempt <= max_retry; ++attempt) {
-            try {
-                auto ok = redis.set(key, token, ttl, sw::redis::UpdateType::NOT_EXIST);
-                if (ok) {
-                    return true;
-                }
-            } catch (const sw::redis::Error&) {
-                return false;
-            }
-            std::this_thread::sleep_for(retry_interval);
-        }
-        return false;
-    };
+    for (std::size_t attempt = 0; attempt <= max_retry; ++attempt) {
+        auto future = config_.cluster_mode
+                          ? async_cluster_->set(key, token, ttl, sw::redis::UpdateType::NOT_EXIST)
+                          : async_redis_->set(key, token, ttl, sw::redis::UpdateType::NOT_EXIST);
+        auto acquired = WaitFuture(std::move(future));
 
-    if (config_.cluster_mode) {
-        return try_set(*cluster_);
+        if (acquired) {
+            return true;
+        }
+
+        if (attempt < max_retry) {
+            boost::this_fiber::sleep_for(retry_interval);
+        }
     }
-    return try_set(*redis_);
+
+    return false;
 }
 
 bool RedisClient::ReleaseLock(std::string_view key, std::string_view token) {
@@ -169,19 +156,14 @@ bool RedisClient::ReleaseLock(std::string_view key, std::string_view token) {
     static const char* lua_script =
         "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
 
-    auto run_script = [&](auto& redis) {
-        try {
-            long long removed = redis.template eval<long long>(lua_script, {std::string(key)}, {std::string(token)});
-            return removed > 0;
-        } catch (const sw::redis::Error&) {
-            return false;
-        }
-    };
-
-    if (config_.cluster_mode) {
-        return run_script(*cluster_);
-    }
-    return run_script(*redis_);
+    std::vector<std::string> keys{std::string(key)};
+    std::vector<std::string> args{std::string(token)};
+    auto future = config_.cluster_mode
+                      ? async_cluster_->eval<long long>(lua_script, keys.begin(), keys.end(),
+                                                        args.begin(), args.end())
+                      : async_redis_->eval<long long>(lua_script, keys.begin(), keys.end(),
+                                                      args.begin(), args.end());
+    return WaitFuture(std::move(future)) > 0;
 }
 
 sw::redis::ConnectionOptions RedisClient::BuildConnectionOptions(const RedisEndpoint& endpoint) const {
@@ -213,175 +195,89 @@ bool RedisClient::Exists(std::string_view key) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        std::size_t count = 0;
-        if (config_.cluster_mode) {
-            count = cluster_->exists(key);
-        } else {
-            count = redis_->exists(key);
-        }
-        return count > 0;
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->exists(key) : async_redis_->exists(key);
+    return WaitFuture(std::move(future)) > 0;
 }
 
 bool RedisClient::Expire(std::string_view key, std::chrono::seconds ttl) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        if (config_.cluster_mode) {
-            return cluster_->expire(key, ttl);
-        }
-        return redis_->expire(key, ttl);
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->expire(key, ttl)
+                                       : async_redis_->expire(key, ttl);
+    return WaitFuture(std::move(future));
 }
 
 bool RedisClient::HSet(std::string_view key, std::string_view field, std::string_view value) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        long long updated = 0;
-        if (config_.cluster_mode) {
-            updated = cluster_->hset(key, field, value);
-        } else {
-            updated = redis_->hset(key, field, value);
-        }
-        return updated >= 0;
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->hset(key, field, value)
+                                       : async_redis_->hset(key, field, value);
+    return WaitFuture(std::move(future)) >= 0;
 }
 
 std::optional<std::string> RedisClient::HGet(std::string_view key, std::string_view field) {
     if (!EnsureConnected()) {
         return std::nullopt;
     }
-    try {
-        sw::redis::OptionalString val;
-        if (config_.cluster_mode) {
-            val = cluster_->hget(key, field);
-        } else {
-            val = redis_->hget(key, field);
-        }
-        if (val) {
-            return *val;
-        }
-        return std::nullopt;
-    } catch (const sw::redis::Error&) {
-        return std::nullopt;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->hget(key, field)
+                                       : async_redis_->hget(key, field);
+    return ToStdOptional(WaitFuture(std::move(future)));
 }
 
 bool RedisClient::HDel(std::string_view key, std::string_view field) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        long long removed = 0;
-        if (config_.cluster_mode) {
-            removed = cluster_->hdel(key, field);
-        } else {
-            removed = redis_->hdel(key, field);
-        }
-        return removed > 0;
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->hdel(key, field)
+                                       : async_redis_->hdel(key, field);
+    return WaitFuture(std::move(future)) > 0;
 }
 
 std::unordered_map<std::string, std::string> RedisClient::HGetAll(std::string_view key) {
-    std::unordered_map<std::string, std::string> result;
     if (!EnsureConnected()) {
-        return result;
+        return {};
     }
-    try {
-        auto inserter = std::inserter(result, result.begin());
-        if (config_.cluster_mode) {
-            cluster_->hgetall(key, inserter);
-        } else {
-            redis_->hgetall(key, inserter);
-        }
-    } catch (const sw::redis::Error&) {
-        result.clear();
-    }
-    return result;
+    auto future =
+        config_.cluster_mode
+            ? async_cluster_->hgetall<std::unordered_map<std::string, std::string>>(key)
+            : async_redis_->hgetall<std::unordered_map<std::string, std::string>>(key);
+    return WaitFuture(std::move(future));
 }
 
 bool RedisClient::LPush(std::string_view key, std::string_view value) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        long long count = 0;
-        if (config_.cluster_mode) {
-            count = cluster_->lpush(key, value);
-        } else {
-            count = redis_->lpush(key, value);
-        }
-        return count > 0;
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->lpush(key, value)
+                                       : async_redis_->lpush(key, value);
+    return WaitFuture(std::move(future)) > 0;
 }
 
 bool RedisClient::RPush(std::string_view key, std::string_view value) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        long long count = 0;
-        if (config_.cluster_mode) {
-            count = cluster_->rpush(key, value);
-        } else {
-            count = redis_->rpush(key, value);
-        }
-        return count > 0;
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->rpush(key, value)
+                                       : async_redis_->rpush(key, value);
+    return WaitFuture(std::move(future)) > 0;
 }
 
 std::optional<std::string> RedisClient::LPop(std::string_view key) {
     if (!EnsureConnected()) {
         return std::nullopt;
     }
-    try {
-        sw::redis::OptionalString val;
-        if (config_.cluster_mode) {
-            val = cluster_->lpop(key);
-        } else {
-            val = redis_->lpop(key);
-        }
-        if (val) {
-            return *val;
-        }
-    } catch (const sw::redis::Error&) {
-    }
-    return std::nullopt;
+    auto future = config_.cluster_mode ? async_cluster_->lpop(key) : async_redis_->lpop(key);
+    return ToStdOptional(WaitFuture(std::move(future)));
 }
 
 std::optional<std::string> RedisClient::RPop(std::string_view key) {
     if (!EnsureConnected()) {
         return std::nullopt;
     }
-    try {
-        sw::redis::OptionalString val;
-        if (config_.cluster_mode) {
-            val = cluster_->rpop(key);
-        } else {
-            val = redis_->rpop(key);
-        }
-        if (val) {
-            return *val;
-        }
-    } catch (const sw::redis::Error&) {
-    }
-    return std::nullopt;
+    auto future = config_.cluster_mode ? async_cluster_->rpop(key) : async_redis_->rpop(key);
+    return ToStdOptional(WaitFuture(std::move(future)));
 }
 
 bool RedisClient::ExecutePipeline(const PipelineHandler& handler, std::string_view hash_tag) {
@@ -390,17 +286,20 @@ bool RedisClient::ExecutePipeline(const PipelineHandler& handler, std::string_vi
     }
     try {
         if (config_.cluster_mode) {
-            if (hash_tag.empty()) {
+            if (!sync_cluster_ || hash_tag.empty()) {
                 return false;
             }
-            auto pipe = cluster_->pipeline(hash_tag);
+            auto pipe = sync_cluster_->pipeline(hash_tag);
             handler(pipe);
             pipe.exec();
-        } else {
-            auto pipe = redis_->pipeline();
-            handler(pipe);
-            pipe.exec();
+            return true;
         }
+        if (!sync_redis_) {
+            return false;
+        }
+        auto pipe = sync_redis_->pipeline();
+        handler(pipe);
+        pipe.exec();
         return true;
     } catch (const sw::redis::Error&) {
         return false;
@@ -413,37 +312,22 @@ std::optional<std::string> RedisClient::Eval(const std::string& script,
     if (!EnsureConnected()) {
         return std::nullopt;
     }
-    auto run = [&](auto& client) -> std::optional<std::string> {
-        try {
-            auto result = client.template eval<sw::redis::OptionalString>(script, keys.begin(), keys.end(), args.begin(), args.end());
-            if (result) {
-                return *result;
-            }
-        } catch (const sw::redis::Error&) {
-        }
-        return std::nullopt;
-    };
-
-    if (config_.cluster_mode) {
-        return run(*cluster_);
-    }
-    return run(*redis_);
+    auto future =
+        config_.cluster_mode
+            ? async_cluster_->eval<sw::redis::OptionalString>(script, keys.begin(), keys.end(),
+                                                              args.begin(), args.end())
+            : async_redis_->eval<sw::redis::OptionalString>(script, keys.begin(), keys.end(),
+                                                            args.begin(), args.end());
+    return ToStdOptional(WaitFuture(std::move(future)));
 }
 
 bool RedisClient::Publish(std::string_view channel, std::string_view message) {
     if (!EnsureConnected()) {
         return false;
     }
-    try {
-        if (config_.cluster_mode) {
-            cluster_->publish(channel, message);
-        } else {
-            redis_->publish(channel, message);
-        }
-        return true;
-    } catch (const sw::redis::Error&) {
-        return false;
-    }
+    auto future = config_.cluster_mode ? async_cluster_->publish(channel, message)
+                                       : async_redis_->publish(channel, message);
+    return WaitFuture(std::move(future)) > 0;
 }
 
 bool RedisClient::Subscribe(const std::vector<std::string>& channels, PubSubCallback callback) {
@@ -456,31 +340,24 @@ bool RedisClient::Subscribe(const std::vector<std::string>& channels, PubSubCall
     std::lock_guard<std::mutex> lock(subscriber_mutex_);
     try {
         if (config_.cluster_mode) {
-            subscriber_ = std::make_unique<sw::redis::Subscriber>(cluster_->subscriber());
+            subscriber_ = std::make_unique<sw::redis::AsyncSubscriber>(async_cluster_->subscriber());
         } else {
-            subscriber_ = std::make_unique<sw::redis::Subscriber>(redis_->subscriber());
-        }
-        for (const auto& ch : channels) {
-            subscriber_->subscribe(ch);
+            subscriber_ = std::make_unique<sw::redis::AsyncSubscriber>(async_redis_->subscriber());
         }
         subscriber_callback_ = callback;
         subscriber_->on_message([this](std::string channel, std::string msg) {
-            if (subscriber_callback_) {
-                subscriber_callback_(channel, msg);
+            auto handler = subscriber_callback_;
+            if (!handler) {
+                return;
             }
+            scheduler_->Schedule([handler, channel = std::move(channel), msg = std::move(msg)]() mutable {
+                handler(channel, msg);
+            });
         });
-        subscriber_running_ = true;
-        subscriber_thread_ = std::thread([this]() {
-            while (subscriber_running_) {
-                try {
-                    subscriber_->consume();
-                } catch (const sw::redis::Error&) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-            }
-        });
-    } catch (const sw::redis::Error&) {
-        subscriber_running_ = false;
+        for (const auto& ch : channels) {
+            WaitFuture(subscriber_->subscribe(ch));
+        }
+    } catch (...) {
         subscriber_.reset();
         subscriber_callback_ = nullptr;
         return false;
@@ -490,17 +367,11 @@ bool RedisClient::Subscribe(const std::vector<std::string>& channels, PubSubCall
 
 bool RedisClient::Unsubscribe() {
     std::lock_guard<std::mutex> lock(subscriber_mutex_);
-    if (subscriber_running_) {
-        subscriber_running_ = false;
-    }
     if (subscriber_) {
         try {
-            subscriber_->unsubscribe();
-        } catch (const sw::redis::Error&) {
+            WaitFuture(subscriber_->unsubscribe());
+        } catch (...) {
         }
-    }
-    if (subscriber_thread_.joinable()) {
-        subscriber_thread_.join();
     }
     subscriber_.reset();
     subscriber_callback_ = nullptr;
@@ -511,10 +382,11 @@ std::optional<std::string> RedisClient::XAdd(std::string_view stream,
                                              const std::map<std::string, std::string>& values,
                                              std::optional<std::size_t> max_len,
                                              bool exact_trim) {
-    if (!EnsureConnected()) {
+    if (!EnsureConnected() || values.empty()) {
         return std::nullopt;
     }
-    auto exec = [&](auto& client) -> std::optional<std::string> {
+
+    auto execute = [&](auto& client) -> std::optional<std::string> {
         try {
             if (max_len && *max_len > 0) {
                 return client.xadd(stream, "*", values.begin(), values.end(),
@@ -527,9 +399,16 @@ std::optional<std::string> RedisClient::XAdd(std::string_view stream,
     };
 
     if (config_.cluster_mode) {
-        return exec(*cluster_);
+        if (!sync_cluster_) {
+            return std::nullopt;
+        }
+        return execute(*sync_cluster_);
     }
-    return exec(*redis_);
+
+    if (!sync_redis_) {
+        return std::nullopt;
+    }
+    return execute(*sync_redis_);
 }
 
 RedisClient::StreamEntries RedisClient::XRead(const std::vector<StreamKey>& streams,
@@ -540,40 +419,92 @@ RedisClient::StreamEntries RedisClient::XRead(const std::vector<StreamKey>& stre
         return entries;
     }
 
-    auto read_single = [&](auto& client, const StreamKey& key_pair) {
+    auto read = [&](auto& client, const StreamKey& stream) {
         std::vector<std::pair<std::string, std::map<std::string, std::string>>> messages;
         try {
-            if (timeout.count() > 0) {
-                if (count > 0) {
-                    client.xread(key_pair.first, key_pair.second, timeout,
-                                 static_cast<long long>(count), std::back_inserter(messages));
-                } else {
-                    client.xread(key_pair.first, key_pair.second, timeout, std::back_inserter(messages));
-                }
-            } else if (count > 0) {
-                client.xread(key_pair.first, key_pair.second, static_cast<long long>(count),
-                             std::back_inserter(messages));
+            const std::string start_id = stream.second.empty() ? "-" : std::string(stream.second);
+            if (count > 0) {
+                client.xrange(stream.first, start_id, "+", static_cast<long long>(count),
+                              std::back_inserter(messages));
             } else {
-                client.xread(key_pair.first, key_pair.second, std::back_inserter(messages));
-            }
-            for (auto& msg : messages) {
-                entries.emplace_back(std::move(msg));
+                client.xrange(stream.first, start_id, "+", std::back_inserter(messages));
             }
         } catch (const sw::redis::Error&) {
-            entries.clear();
+            messages.clear();
+        }
+        for (auto& msg : messages) {
+            entries.emplace_back(std::move(msg));
         }
     };
 
     if (config_.cluster_mode) {
-        for (const auto& stream : streams) {
-            read_single(*cluster_, stream);
+        if (!sync_cluster_) {
+            return entries;
         }
-    } else {
         for (const auto& stream : streams) {
-            read_single(*redis_, stream);
+            read(*sync_cluster_, stream);
         }
+        return entries;
     }
 
+    if (!sync_redis_) {
+        return entries;
+    }
+    for (const auto& stream : streams) {
+        read(*sync_redis_, stream);
+    }
+    return entries;
+}
+
+RedisClient::StreamEntries RedisClient::XReadGroup(const std::string& group,
+                                                   const std::string& consumer,
+                                                   const std::vector<StreamKey>& streams,
+                                                   std::chrono::milliseconds timeout,
+                                                   std::size_t count) {
+    StreamEntries entries;
+    if (!EnsureConnected() || streams.empty() || group.empty() || consumer.empty()) {
+        return entries;
+    }
+
+    auto read_group = [&](auto& client) {
+        for (const auto& stream : streams) {
+            try {
+                std::vector<std::pair<std::string,
+                                      std::vector<std::pair<std::string,
+                                                            std::map<std::string, std::string>>>>>
+                    messages;
+                std::chrono::milliseconds block = timeout;
+                if (block.count() < 0) {
+                    block = std::chrono::milliseconds(0);
+                }
+                const long long max_count = count > 0 ? static_cast<long long>(count) : 1;
+                const std::string id = stream.second.empty() ? ">" : stream.second;
+                client.xreadgroup(group, consumer, stream.first, id, block, max_count, false,
+                                  std::back_inserter(messages));
+                for (auto& message_set : messages) {
+                    for (auto& message : message_set.second) {
+                        entries.emplace_back(std::move(message));
+                    }
+                }
+            } catch (const sw::redis::Error&) {
+                entries.clear();
+                break;
+            }
+        }
+    };
+
+    if (config_.cluster_mode) {
+        if (!sync_cluster_) {
+            return entries;
+        }
+        read_group(*sync_cluster_);
+        return entries;
+    }
+
+    if (!sync_redis_) {
+        return entries;
+    }
+    read_group(*sync_redis_);
     return entries;
 }
 
@@ -583,7 +514,8 @@ bool RedisClient::XAck(std::string_view stream,
     if (!EnsureConnected() || ids.empty()) {
         return false;
     }
-    auto ack = [&](auto& client) {
+
+    auto ack = [&](auto& client) -> bool {
         try {
             auto removed = client.xack(stream, group, ids.begin(), ids.end());
             return removed > 0;
@@ -591,10 +523,18 @@ bool RedisClient::XAck(std::string_view stream,
             return false;
         }
     };
+
     if (config_.cluster_mode) {
-        return ack(*cluster_);
+        if (!sync_cluster_) {
+            return false;
+        }
+        return ack(*sync_cluster_);
     }
-    return ack(*redis_);
+
+    if (!sync_redis_) {
+        return false;
+    }
+    return ack(*sync_redis_);
 }
 
 bool RedisClient::XGroupCreate(std::string_view stream,
@@ -604,7 +544,8 @@ bool RedisClient::XGroupCreate(std::string_view stream,
     if (!EnsureConnected()) {
         return false;
     }
-    auto create = [&](auto& client) {
+
+    auto create = [&](auto& client) -> bool {
         try {
             client.xgroup_create(stream, group, id, mkstream);
             return true;
@@ -612,27 +553,44 @@ bool RedisClient::XGroupCreate(std::string_view stream,
             return false;
         }
     };
+
     if (config_.cluster_mode) {
-        return create(*cluster_);
+        if (!sync_cluster_) {
+            return false;
+        }
+        return create(*sync_cluster_);
     }
-    return create(*redis_);
+
+    if (!sync_redis_) {
+        return false;
+    }
+    return create(*sync_redis_);
 }
 
 bool RedisClient::XGroupDestroy(std::string_view stream, std::string_view group) {
     if (!EnsureConnected()) {
         return false;
     }
-    auto destroy = [&](auto& client) {
+
+    auto destroy = [&](auto& client) -> bool {
         try {
             return client.xgroup_destroy(stream, group) > 0;
         } catch (const sw::redis::Error&) {
             return false;
         }
     };
+
     if (config_.cluster_mode) {
-        return destroy(*cluster_);
+        if (!sync_cluster_) {
+            return false;
+        }
+        return destroy(*sync_cluster_);
     }
-    return destroy(*redis_);
+
+    if (!sync_redis_) {
+        return false;
+    }
+    return destroy(*sync_redis_);
 }
 
 bool RedisClient::ExecuteTransaction(const TransactionHandler& handler,
@@ -641,23 +599,20 @@ bool RedisClient::ExecuteTransaction(const TransactionHandler& handler,
     if (!EnsureConnected() || !handler) {
         return false;
     }
-
-    if (config_.cluster_mode) {
-        if (hash_tag.empty()) {
-            return false;
-        }
-        try {
-            auto tx = cluster_->transaction(hash_tag, piped, true);
+    try {
+        if (config_.cluster_mode) {
+            if (!sync_cluster_ || hash_tag.empty()) {
+                return false;
+            }
+            auto tx = sync_cluster_->transaction(hash_tag, piped, true);
             handler(tx);
             tx.exec();
             return true;
-        } catch (const sw::redis::Error&) {
+        }
+        if (!sync_redis_) {
             return false;
         }
-    }
-
-    try {
-        auto tx = redis_->transaction(piped, true);
+        auto tx = sync_redis_->transaction(piped, true);
         handler(tx);
         tx.exec();
         return true;

@@ -105,7 +105,8 @@ public:
         tcp::TcpServer::AcceptHandler on_accept,
         tcp::TcpConnection::ReceiveHandler on_receive,
         tcp::TcpConnection::ErrorHandler on_error,
-        std::size_t read_buffer_size = tcp::TcpServer::kDefaultReadBufferSize);
+        std::size_t read_buffer_size = tcp::TcpServer::kDefaultReadBufferSize,
+        bool auto_start = true);
 
     SLG_APPLICATION_API std::shared_ptr<tcp::TcpClient> CreateTcpClient();
 
@@ -186,6 +187,8 @@ public:
         std::uint64_t connection_id) const;
     SLG_APPLICATION_API bool CloseListenerConnection(std::string_view listener_name,
                                                      std::uint64_t connection_id);
+    SLG_APPLICATION_API void RemoveListenerConnection(std::string_view listener_name,
+                                                      std::uint64_t connection_id);
 
     SLG_APPLICATION_API bool StartListeners();
     SLG_APPLICATION_API bool StartConnectors();
@@ -257,8 +260,8 @@ private:
         const std::string& handler) const;
     void TrackListenerConnection(const std::string& listener_name,
                                  const tcp::TcpConnectionPtr& connection);
-    void RemoveListenerConnection(const std::string& listener_name,
-                                  const tcp::TcpConnectionPtr& connection);
+    void UntrackListenerConnection(const std::string& listener_name,
+                                   const tcp::TcpConnectionPtr& connection);
 
     Options options_;
     DependencyContainer dependencies_;

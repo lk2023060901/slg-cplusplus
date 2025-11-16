@@ -3,14 +3,18 @@
 #include <csignal>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "application/application.h"
 #include "application/protocol/protocol_registry.h"
 #include "application/protocol/tcp_protocol_router.h"
+#include "coroutine/fiber_tcp_session.h"
+#include "coroutine/scheduler.h"
 #include "json/json_value.h"
 #include "logging/logging_config.h"
 #include "logging/logging_manager.h"
@@ -30,6 +34,56 @@ namespace {
 
 std::atomic<int> g_received_signal{0};
 std::shared_ptr<login::LoginService> g_login_service;
+std::shared_ptr<slg::coroutine::CoroutineScheduler> g_fiber_scheduler;
+std::mutex g_listener_sessions_mutex;
+std::unordered_map<std::string,
+                   std::unordered_map<std::uint64_t, std::weak_ptr<slg::coroutine::FiberTcpSession>>>
+    g_listener_sessions;
+
+void TrackListenerSession(const std::string& listener_name,
+                          std::uint64_t connection_id,
+                          const std::shared_ptr<slg::coroutine::FiberTcpSession>& session) {
+    std::lock_guard<std::mutex> lock(g_listener_sessions_mutex);
+    g_listener_sessions[listener_name][connection_id] = session;
+}
+
+std::shared_ptr<slg::coroutine::FiberTcpSession> RemoveListenerSession(
+    const std::string& listener_name,
+    std::uint64_t connection_id) {
+    std::lock_guard<std::mutex> lock(g_listener_sessions_mutex);
+    auto listener_iter = g_listener_sessions.find(listener_name);
+    if (listener_iter == g_listener_sessions.end()) {
+        return nullptr;
+    }
+    auto session_iter = listener_iter->second.find(connection_id);
+    if (session_iter == listener_iter->second.end()) {
+        return nullptr;
+    }
+    auto session = session_iter->second.lock();
+    listener_iter->second.erase(session_iter);
+    if (listener_iter->second.empty()) {
+        g_listener_sessions.erase(listener_iter);
+    }
+    return session;
+}
+
+void StopAllListenerSessions() {
+    std::vector<std::shared_ptr<slg::coroutine::FiberTcpSession>> sessions;
+    {
+        std::lock_guard<std::mutex> lock(g_listener_sessions_mutex);
+        for (auto& [listener, connection_map] : g_listener_sessions) {
+            for (auto& [connection_id, weak_session] : connection_map) {
+                if (auto session = weak_session.lock()) {
+                    sessions.push_back(std::move(session));
+                }
+            }
+        }
+        g_listener_sessions.clear();
+    }
+    for (auto& session : sessions) {
+        session->Stop();
+    }
+}
 
 struct ServiceConfig {
     std::string name{"login-service"};
@@ -155,6 +209,10 @@ void LogStartupInfo(const ServiceConfig& service) {
 void RegisterTcpHandlers(app::Application& app_instance,
                          const std::shared_ptr<login::LoginService>& service) {
     namespace protocol = slg::application::protocol;
+    if (!g_fiber_scheduler) {
+        g_fiber_scheduler = std::make_shared<slg::coroutine::CoroutineScheduler>();
+    }
+
     auto player_handler = std::make_shared<login::PlayerLoginHandler>(
         login::PlayerLoginHandler::Dependencies{service->HttpClient(), service->Snowflake(),
                                                 service->GetOptions(), service->ServerLookup()});
@@ -177,33 +235,71 @@ void RegisterTcpHandlers(app::Application& app_instance,
 
     app_instance.RegisterListenerHandler(
         "player_handler",
-        [player_router](const slg::network::tcp::TcpConnectionPtr& conn) {
+        [player_router, scheduler = g_fiber_scheduler, app_ptr = &app_instance](
+            const slg::network::tcp::TcpConnectionPtr& conn) {
             player_router->OnAccept(conn);
+            const auto connection_id = conn->ConnectionId();
+            auto session =
+                std::make_shared<slg::coroutine::FiberTcpSession>(*scheduler, conn);
+            std::string listener_name = conn->ListenerName();
+            TrackListenerSession(listener_name, connection_id, session);
+            session->Start(
+                [player_router](const slg::network::tcp::TcpConnectionPtr& connection,
+                                const std::uint8_t* data,
+                                std::size_t size) {
+                    player_router->OnReceive(connection, data, size);
+                },
+                [player_router,
+                 app_ptr,
+                 listener_name = std::move(listener_name),
+                 connection_id](const slg::network::tcp::TcpConnectionPtr& connection,
+                                const boost::system::error_code& ec) {
+                    if (auto session = RemoveListenerSession(listener_name, connection_id)) {
+                        session->Stop();
+                    }
+                    if (connection) {
+                        connection->Close();
+                    }
+                    player_router->OnError(connection, ec);
+                    app_ptr->RemoveListenerConnection(listener_name, connection_id);
+                });
         },
-        [player_router](const slg::network::tcp::TcpConnectionPtr& conn,
-                        const std::uint8_t* data,
-                        std::size_t size) {
-            player_router->OnReceive(conn, data, size);
-        },
-        [player_router](const slg::network::tcp::TcpConnectionPtr& conn,
-                        const boost::system::error_code& ec) {
-            player_router->OnError(conn, ec);
-        });
+        {},
+        {});
 
     app_instance.RegisterListenerHandler(
         "internal_handler",
-        [internal_router](const slg::network::tcp::TcpConnectionPtr& conn) {
+        [internal_router, scheduler = g_fiber_scheduler, app_ptr = &app_instance](
+            const slg::network::tcp::TcpConnectionPtr& conn) {
             internal_router->OnAccept(conn);
+            const auto connection_id = conn->ConnectionId();
+            std::string listener_name = conn->ListenerName();
+            auto session =
+                std::make_shared<slg::coroutine::FiberTcpSession>(*scheduler, conn);
+            TrackListenerSession(listener_name, connection_id, session);
+            session->Start(
+                [internal_router](const slg::network::tcp::TcpConnectionPtr& connection,
+                                  const std::uint8_t* data,
+                                  std::size_t size) {
+                    internal_router->OnReceive(connection, data, size);
+                },
+                [internal_router,
+                 app_ptr,
+                 listener_name = std::move(listener_name),
+                 connection_id](const slg::network::tcp::TcpConnectionPtr& connection,
+                                const boost::system::error_code& ec) {
+                    if (auto session = RemoveListenerSession(listener_name, connection_id)) {
+                        session->Stop();
+                    }
+                    if (connection) {
+                        connection->Close();
+                    }
+                    internal_router->OnError(connection, ec);
+                    app_ptr->RemoveListenerConnection(listener_name, connection_id);
+                });
         },
-        [internal_router](const slg::network::tcp::TcpConnectionPtr& conn,
-                          const std::uint8_t* data,
-                          std::size_t size) {
-            internal_router->OnReceive(conn, data, size);
-        },
-        [internal_router](const slg::network::tcp::TcpConnectionPtr& conn,
-                          const boost::system::error_code& ec) {
-            internal_router->OnError(conn, ec);
-        });
+        {},
+        {});
 }
 
 }  // namespace
@@ -248,6 +344,11 @@ int main(int argc, const char* argv[]) {
     });
 
     application.SetShutdownHook([](app::Application&) {
+        StopAllListenerSessions();
+        if (g_fiber_scheduler) {
+            g_fiber_scheduler->Stop();
+            g_fiber_scheduler.reset();
+        }
         g_login_service.reset();
         g_received_signal.store(0, std::memory_order_relaxed);
         LOGIN_LOG_INFO("login service shutdown complete");
